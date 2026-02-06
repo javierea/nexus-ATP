@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import typer
 from pydantic import ValidationError
 
 from .config import Config, default_config, load_config, save_config
+from .fetcher import FetchOptions, run_fetch
 from .logging_utils import setup_logging
 from .paths import config_path, data_dir, state_path
 from .planner import plan_all
+from .storage_sqlite import DocumentStore
 from .state import State, default_state, load_state, save_state
 
 app = typer.Typer(help="rg_atp_pipeline CLI (Etapa 0)")
@@ -23,6 +26,7 @@ def ensure_dirs() -> None:
     base = data_dir()
     for sub in [
         "raw_pdfs",
+        "raw_pdfs/latest",
         "raw_text",
         "structured",
         "state",
@@ -44,6 +48,9 @@ def init_project() -> None:
     st_path = state_path()
     if not st_path.exists():
         save_state(default_state(), st_path)
+
+    store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
+    store.initialize()
 
 
 
@@ -103,6 +110,43 @@ def plan() -> None:
             typer.echo("Últimas 10:")
             for url in tail:
                 typer.echo(f"- {url}")
+
+
+@app.command("fetch")
+def fetch(
+    mode: str = typer.Option("both", help="Modo de descarga: new, old o both."),
+    year: int | None = typer.Option(None, help="Filtrar por año (solo modo new)."),
+    n_start: int | None = typer.Option(None, help="Inicio de N para modo new."),
+    n_end: int | None = typer.Option(None, help="Fin de N para modo new."),
+    old_start: int | None = typer.Option(None, help="Inicio para modo old."),
+    old_end: int | None = typer.Option(None, help="Fin para modo old."),
+    dry_run: bool = typer.Option(False, help="No realiza requests, solo planifica."),
+    max_downloads: int | None = typer.Option(None, "--max", help="Máximo de descargas."),
+) -> None:
+    """Fetch PDFs (Etapa 1)."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    config = load_config(config_path())
+    state = load_state(state_path())
+    store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
+    summary = run_fetch(
+        config,
+        state,
+        store,
+        data_dir(),
+        FetchOptions(
+            mode=mode,
+            year=year,
+            n_start=n_start,
+            n_end=n_end,
+            old_start=old_start,
+            old_end=old_end,
+            dry_run=dry_run,
+            max_downloads=max_downloads,
+        ),
+        logging.getLogger("rg_atp_pipeline"),
+    )
+    typer.echo(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
 
 
 @app.callback()
