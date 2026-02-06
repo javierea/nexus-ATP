@@ -14,6 +14,7 @@ def test_init_creates_files(monkeypatch, tmp_path: Path) -> None:
     assert config_path().exists()
     assert state_path().exists()
     assert (data_dir() / "logs").exists()
+    assert (data_dir() / "state" / "rg_atp.sqlite").exists()
 
 
 def test_validate_config_ok(monkeypatch, tmp_path: Path) -> None:

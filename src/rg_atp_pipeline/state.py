@@ -3,6 +3,7 @@
 Data contract:
 - schema_version: integer version for future migrations
 - last_run_at: ISO timestamp string or null when never run
+- last_fetch_summary: dict of latest fetch counters
 - last_seen_n_by_year: mapping year -> last seen N (string keys)
 - notes: freeform notes for operators
 """
@@ -22,6 +23,7 @@ class State(BaseModel):
 
     schema_version: int = Field(..., ge=1)
     last_run_at: Optional[datetime]
+    last_fetch_summary: Dict[str, int] = Field(default_factory=dict)
     last_seen_n_by_year: Dict[str, int]
     notes: str
 
@@ -31,6 +33,7 @@ def default_state() -> State:
     return State(
         schema_version=1,
         last_run_at=None,
+        last_fetch_summary={},
         last_seen_n_by_year={},
         notes="Estado inicial",
     )
