@@ -1,0 +1,17 @@
+base_url_new: "https://example.com/new"
+base_url_old: "https://example.com/old"
+rate_limit_rps: 1
+user_agent: "rg_atp_pipeline/0.1"
+years: [2026, 2025, 2024]
+max_n_by_year:
+  "2026": 7
+  "2025": 43
+  "2024": 39
+old_range:
+  start: 1
+  end: 2172
+verify_last_k: 5
+request_timeout_sec: 30
+retry:
+  max_attempts: 3
+  backoff_sec: 2
