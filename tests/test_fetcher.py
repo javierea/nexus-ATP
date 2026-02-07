@@ -46,6 +46,7 @@ def _fetch_options() -> FetchOptions:
         old_end=1,
         dry_run=False,
         max_downloads=None,
+        skip_existing=False,
     )
 
 
@@ -137,3 +138,55 @@ def _logger():
     logger = logging.getLogger("rg_atp_pipeline.tests")
     logger.addHandler(logging.NullHandler())
     return logger
+
+
+@responses.activate
+def test_old_suffix_year_cuts_off_higher_years(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("RG_ATP_PIPELINE_ROOT", str(tmp_path))
+    cfg = Config(
+        base_url_new="https://example.com/new",
+        base_url_old="https://example.com/old",
+        rate_limit_rps=1000,
+        user_agent="rg_atp_pipeline-test",
+        years=[2026],
+        max_n_by_year={"2026": 1},
+        old_range=OldRange(start=1, end=2),
+        old_min_number=1,
+        old_year_start=2014,
+        old_year_end=2016,
+        verify_last_k=5,
+        request_timeout_sec=5,
+        retry=RetryPolicy(max_attempts=1, backoff_sec=0),
+    )
+    store = _setup_state(tmp_path)
+
+    responses.add(responses.HEAD, "https://example.com/old/2.pdf", status=404)
+    responses.add(responses.HEAD, "https://example.com/old/2-2016.pdf", status=404)
+    responses.add(responses.HEAD, "https://example.com/old/2-16.pdf", status=404)
+    responses.add(responses.HEAD, "https://example.com/old/2-2015.pdf", status=404)
+    responses.add(responses.HEAD, "https://example.com/old/2-15.pdf", status=404)
+    responses.add(responses.HEAD, "https://example.com/old/2-2014.pdf", status=404)
+    responses.add(responses.HEAD, "https://example.com/old/2-14.pdf", status=200)
+    responses.add(
+        responses.GET, "https://example.com/old/2-14.pdf", status=200, body=b"pdf-content"
+    )
+
+    responses.add(responses.HEAD, "https://example.com/old/1.pdf", status=404)
+    responses.add(responses.HEAD, "https://example.com/old/1-2014.pdf", status=404)
+    responses.add(responses.HEAD, "https://example.com/old/1-14.pdf", status=404)
+
+    options = FetchOptions(
+        mode="old",
+        year=None,
+        n_start=None,
+        n_end=None,
+        old_start=1,
+        old_end=2,
+        dry_run=False,
+        max_downloads=None,
+        skip_existing=False,
+    )
+
+    summary = run_fetch(cfg, default_state(), store, data_dir(), options, _logger())
+    assert summary.downloaded == 1
+    assert summary.missing == 1

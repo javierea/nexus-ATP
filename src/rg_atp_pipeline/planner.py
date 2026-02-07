@@ -110,7 +110,7 @@ def plan_old_docs(
                 doc_key = f"OLD-{num}-{suffix}"
                 url = f"{base}/{num}-{suffix}.pdf"
                 docs.append(
-                    PlannedDoc(doc_key=doc_key, url=url, doc_family="OLD", year=None, number=num)
+                    PlannedDoc(doc_key=doc_key, url=url, doc_family="OLD", year=year, number=num)
                 )
     return docs
 
