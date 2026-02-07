@@ -10,6 +10,9 @@ max_n_by_year:
 old_range:
   start: 1
   end: 2172
+old_min_number: 1195
+old_year_start: 2004
+old_year_end: 2023
 verify_last_k: 5
 request_timeout_sec: 30
 retry:
