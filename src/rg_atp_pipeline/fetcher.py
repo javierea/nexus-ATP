@@ -64,7 +64,7 @@ def run_fetch(
 
     found_old_numbers: set[int] = set()
     if options.skip_existing:
-        planned = _filter_existing(planned, store, found_old_numbers, logger)
+        planned, old_year_cutoff = _filter_existing(planned, store, found_old_numbers, logger)
         logger.info("Restantes %s URLs tras omitir descargadas.", len(planned))
 
     if options.dry_run:
@@ -94,11 +94,14 @@ def run_fetch(
     stop_due_to_max = False
     per_year_status: dict[int, list[str]] = {}
     old_number_cutoff: int | None = None
+    old_year_cutoff: int | None = None
     current_old_number: int | None = None
     current_old_found = False
 
     for entry in planned:
         if entry.doc_family == "OLD":
+            if old_year_cutoff is not None and entry.year is not None and entry.year > old_year_cutoff:
+                continue
             if old_number_cutoff is not None and entry.number > old_number_cutoff:
                 continue
             if current_old_number is None or entry.number != current_old_number:
@@ -141,6 +144,10 @@ def run_fetch(
                     current_old_found = True
                     if old_number_cutoff is None or entry.number < old_number_cutoff:
                         old_number_cutoff = entry.number
+                    if entry.year is not None and (
+                        old_year_cutoff is None or entry.year < old_year_cutoff
+                    ):
+                        old_year_cutoff = entry.year
                 if latest_sha and latest_sha != sha256:
                     changed_hash += 1
                 logger.info("DOWNLOADED %s -> %s", entry.doc_key, pdf_path.name)
@@ -355,9 +362,10 @@ def _filter_existing(
     store: DocumentStore,
     found_old_numbers: set[int],
     logger: logging.Logger,
-) -> list[PlannedDoc]:
+) -> tuple[list[PlannedDoc], int | None]:
     filtered: list[PlannedDoc] = []
     skipped = 0
+    old_year_cutoff: int | None = None
     for entry in planned:
         record = store.get_record(entry.doc_key)
         if (
@@ -369,11 +377,15 @@ def _filter_existing(
             skipped += 1
             if entry.doc_family == "OLD" and entry.number is not None:
                 found_old_numbers.add(entry.number)
+                if record.year is not None and (
+                    old_year_cutoff is None or record.year < old_year_cutoff
+                ):
+                    old_year_cutoff = record.year
             continue
         filtered.append(entry)
     if skipped:
         logger.info("Omitidas %s entradas ya descargadas.", skipped)
-    return filtered
+    return filtered, old_year_cutoff
 
 
 def _record_document(

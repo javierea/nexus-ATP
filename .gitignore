@@ -3,3 +3,5 @@ data/raw_pdfs/latest/*.pdf
 data/raw_text/
 data/tmp/
 data/logs/
+data/state/*.json
+data/raw_pdfs/latest/*.json
