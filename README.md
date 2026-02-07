@@ -45,6 +45,7 @@ python -m rg_atp_pipeline fetch --mode both
 python -m rg_atp_pipeline fetch --mode new --year 2026 --n-start 1 --n-end 5
 python -m rg_atp_pipeline fetch --mode old --old-start 1 --old-end 10 --dry-run
 python -m rg_atp_pipeline fetch --mode both --skip-existing
+python -m rg_atp_pipeline ui --host 127.0.0.1 --port 8000
 ```
 
 ## Notas
@@ -52,3 +53,4 @@ python -m rg_atp_pipeline fetch --mode both --skip-existing
 - El comando `plan` solo imprime URLs candidatas sin hacer requests.
 - `fetch` realiza HEAD/GET según configuración, guarda PDFs versionados en `data/raw_pdfs/` y actualiza SQLite en `data/state/rg_atp.sqlite`.
 - `fetch` puede omitir entradas ya descargadas con `--skip-existing` si el PDF local sigue disponible.
+- `ui` levanta una interfaz mínima para revisar inventario, ver config/estado y ejecutar fetches manuales o programados.
