@@ -86,8 +86,22 @@ def run_fetch(
     changed_hash = 0
     stop_due_to_max = False
     per_year_status: dict[int, list[str]] = {}
+    found_old_numbers: set[int] = set()
+    old_number_cutoff: int | None = None
+    current_old_number: int | None = None
+    current_old_found = False
 
     for entry in planned:
+        if entry.doc_family == "OLD":
+            if old_number_cutoff is not None and entry.number > old_number_cutoff:
+                continue
+            if current_old_number is None or entry.number != current_old_number:
+                if current_old_number is not None and not current_old_found:
+                    missing += 1
+                current_old_number = entry.number
+                current_old_found = entry.number in found_old_numbers
+            if entry.number in found_old_numbers:
+                continue
         if options.max_downloads is not None and downloaded >= options.max_downloads:
             stop_due_to_max = True
             logger.info("Se alcanzó el máximo de descargas (%s).", options.max_downloads)
@@ -104,7 +118,8 @@ def run_fetch(
             http_status = status_code
             if status_code == 404:
                 result_status = "MISSING"
-                missing += 1
+                if entry.doc_family != "OLD":
+                    missing += 1
                 logger.info("MISSING %s", entry.url)
             elif status_code in (200, 405, 501):
                 pdf_bytes = client.get_bytes(entry.url)
@@ -115,6 +130,11 @@ def run_fetch(
                 _write_latest_pointer(latest_dir, entry.doc_key, pdf_path)
                 downloaded += 1
                 result_status = "DOWNLOADED"
+                if entry.doc_family == "OLD":
+                    found_old_numbers.add(entry.number)
+                    current_old_found = True
+                    if old_number_cutoff is None or entry.number < old_number_cutoff:
+                        old_number_cutoff = entry.number
                 if latest_sha and latest_sha != sha256:
                     changed_hash += 1
                 logger.info("DOWNLOADED %s -> %s", entry.doc_key, pdf_path.name)
@@ -140,7 +160,8 @@ def run_fetch(
             if exc.status_code == 404:
                 result_status = "MISSING"
                 http_status = 404
-                missing += 1
+                if entry.doc_family != "OLD":
+                    missing += 1
                 logger.info("MISSING %s", entry.url)
             else:
                 result_status = "ERROR"
@@ -166,6 +187,9 @@ def run_fetch(
         )
         per_year_status.setdefault(entry.year or 0, []).append(result_status)
 
+    if current_old_number is not None and not current_old_found:
+        missing += 1
+
     summary = FetchSummary(
         checked=checked,
         downloaded=downloaded,
@@ -190,7 +214,16 @@ def _plan_documents(config: Config, options: FetchOptions) -> list[PlannedDoc]:
     if mode in ("old", "both"):
         start = options.old_start if options.old_start is not None else config.old_range.start
         end = options.old_end if options.old_end is not None else config.old_range.end
-        docs.extend(plan_old_docs(config.base_url_old, start, end))
+        docs.extend(
+            plan_old_docs(
+                config.base_url_old,
+                start,
+                end,
+                config.old_min_number,
+                config.old_year_start,
+                config.old_year_end,
+            )
+        )
     return docs
 
 

@@ -46,6 +46,9 @@ class Config(BaseModel):
     years: List[int]
     max_n_by_year: Dict[str, int]
     old_range: OldRange
+    old_min_number: int = Field(..., ge=1)
+    old_year_start: int = Field(..., ge=2000, le=2100)
+    old_year_end: int = Field(..., ge=2000, le=2100)
     verify_last_k: int = Field(..., ge=0)
     request_timeout_sec: int = Field(..., ge=1)
     retry: RetryPolicy
@@ -61,6 +64,9 @@ def default_config() -> Config:
         years=[2026, 2025, 2024],
         max_n_by_year={"2026": 7, "2025": 43, "2024": 39},
         old_range=OldRange(start=1, end=2172),
+        old_min_number=1195,
+        old_year_start=2004,
+        old_year_end=2023,
         verify_last_k=5,
         request_timeout_sec=30,
         retry=RetryPolicy(max_attempts=3, backoff_sec=2),

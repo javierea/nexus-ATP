@@ -20,6 +20,9 @@ def _config(base_url_old: str) -> Config:
         years=[2026],
         max_n_by_year={"2026": 1},
         old_range=OldRange(start=1, end=1),
+        old_min_number=1,
+        old_year_start=2023,
+        old_year_end=2023,
         verify_last_k=5,
         request_timeout_sec=5,
         retry=RetryPolicy(max_attempts=1, backoff_sec=0),
@@ -53,6 +56,8 @@ def test_head_404_marks_missing(monkeypatch, tmp_path: Path) -> None:
     store = _setup_state(tmp_path)
 
     responses.add(responses.HEAD, "https://example.com/old/1.pdf", status=404)
+    responses.add(responses.HEAD, "https://example.com/old/1-2023.pdf", status=404)
+    responses.add(responses.HEAD, "https://example.com/old/1-23.pdf", status=404)
 
     summary = run_fetch(cfg, default_state(), store, data_dir(), _fetch_options(), _logger())
     assert summary.missing == 1
