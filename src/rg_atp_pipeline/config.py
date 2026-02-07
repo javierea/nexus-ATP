@@ -54,8 +54,8 @@ class Config(BaseModel):
 def default_config() -> Config:
     """Return default configuration values for Etapa 0."""
     return Config(
-        base_url_new="https://example.com/new",
-        base_url_old="https://example.com/old",
+        base_url_new="https://atp.chaco.gob.ar/documentos/legislativos/resoluciones-generales",
+        base_url_old="https://atp.chaco.gob.ar/documentos/legislativos/resoluciones-generales",
         rate_limit_rps=1,
         user_agent="rg_atp_pipeline/0.1",
         years=[2026, 2025, 2024],

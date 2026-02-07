@@ -25,12 +25,12 @@ class PlannedDoc:
 def plan_new(base_url: str, year: int, start_n: int, end_n: int) -> List[str]:
     """Plan URLs for new PDFs.
 
-    Format: RES-{year}-{n}-20-1.pdf (n without zero-padding).
+    Format: res-{year}-{n}-20-1.pdf (n without zero-padding).
     """
     if start_n > end_n:
         return []
     return [
-        f"{base_url.rstrip('/')}/RES-{year}-{n}-20-1.pdf" for n in range(start_n, end_n + 1)
+        f"{base_url.rstrip('/')}/res-{year}-{n}-20-1.pdf" for n in range(start_n, end_n + 1)
     ]
 
 
@@ -51,7 +51,7 @@ def plan_new_docs(base_url: str, year: int, start_n: int, end_n: int) -> List[Pl
     base = base_url.rstrip("/")
     docs = []
     for n in range(start_n, end_n + 1):
-        doc_key = f"RES-{year}-{n}-20-1"
+        doc_key = f"res-{year}-{n}-20-1"
         url = f"{base}/{doc_key}.pdf"
         docs.append(PlannedDoc(doc_key=doc_key, url=url, doc_family="NEW", year=year, number=n))
     return docs
