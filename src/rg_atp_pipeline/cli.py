@@ -122,6 +122,11 @@ def fetch(
     old_end: int | None = typer.Option(None, help="Fin para modo old."),
     dry_run: bool = typer.Option(False, help="No realiza requests, solo planifica."),
     max_downloads: int | None = typer.Option(None, "--max", help="Máximo de descargas."),
+    skip_existing: bool = typer.Option(
+        False,
+        "--skip-existing/--no-skip-existing",
+        help="Omitir entradas ya descargadas con archivo disponible.",
+    ),
 ) -> None:
     """Fetch PDFs (Etapa 1)."""
     setup_logging(data_dir() / "logs")
@@ -143,6 +148,7 @@ def fetch(
             old_end=old_end,
             dry_run=dry_run,
             max_downloads=max_downloads,
+            skip_existing=skip_existing,
         ),
         logging.getLogger("rg_atp_pipeline"),
     )
