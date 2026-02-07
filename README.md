@@ -5,6 +5,24 @@ Proyecto base para la descarga y procesamiento de PDFs ATP. En esta etapa se inc
 ## Requisitos
 - Python 3.11
 
+## Instalación en Windows (Conda)
+```bash
+conda create -n rg-atp python=3.11
+conda activate rg-atp
+
+# Librerías requeridas
+pip install pydantic PyYAML requests typer
+
+# Instalación del proyecto (editable)
+pip install -e .
+```
+
+## Librerías requeridas
+- pydantic
+- PyYAML
+- requests
+- typer
+
 ## Instalación (editable)
 ```bash
 pip install -e .
