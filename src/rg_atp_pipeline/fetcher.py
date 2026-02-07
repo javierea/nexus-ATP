@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from hashlib import sha1
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -206,6 +207,123 @@ def run_fetch(
     return summary
 
 
+def run_manual_fetch(
+    config: Config,
+    state: State,
+    store: DocumentStore,
+    data_dir: Path,
+    url: str,
+    logger: logging.Logger,
+) -> FetchSummary:
+    """Fetch a single PDF URL and register it as MANUAL."""
+    store.initialize()
+    client = HttpClient(
+        HttpClientConfig(
+            rate_limit_rps=config.rate_limit_rps,
+            timeout_sec=config.request_timeout_sec,
+            max_attempts=config.retry.max_attempts,
+            backoff_sec=config.retry.backoff_sec,
+            user_agent=config.user_agent,
+        ),
+        logger=logger,
+    )
+
+    raw_dir = data_dir / "raw_pdfs"
+    latest_dir = raw_dir / "latest"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    latest_dir.mkdir(parents=True, exist_ok=True)
+
+    checked = 1
+    downloaded = 0
+    missing = 0
+    error = 0
+    changed_hash = 0
+
+    now = _now_iso()
+    doc_key = f"MANUAL-{sha1(url.encode('utf-8')).hexdigest()[:12]}"
+    latest_sha = store.get_latest_sha(doc_key)
+    result_status = "ERROR"
+    http_status = None
+    error_message = None
+
+    try:
+        status_code, _ = client.head(url)
+        http_status = status_code
+        if status_code == 404:
+            result_status = "MISSING"
+            missing += 1
+            logger.info("MISSING %s", url)
+        elif status_code in (200, 405, 501):
+            pdf_bytes = client.get_bytes(url)
+            sha256 = _hash_bytes(pdf_bytes)
+            pdf_path = raw_dir / f"{doc_key}__{sha256}.pdf"
+            if not pdf_path.exists():
+                pdf_path.write_bytes(pdf_bytes)
+            _write_latest_pointer(latest_dir, doc_key, pdf_path)
+            downloaded += 1
+            result_status = "DOWNLOADED"
+            if latest_sha and latest_sha != sha256:
+                changed_hash += 1
+            logger.info("DOWNLOADED %s -> %s", doc_key, pdf_path.name)
+            _record_manual_document(
+                store,
+                doc_key,
+                url,
+                now,
+                now,
+                sha256,
+                str(pdf_path),
+                result_status,
+                http_status,
+                error_message,
+            )
+        else:
+            result_status = "ERROR"
+            error += 1
+            error_message = f"HEAD {url} -> {status_code}"
+            logger.warning(error_message)
+    except HttpClientError as exc:
+        if exc.status_code == 404:
+            result_status = "MISSING"
+            http_status = 404
+            missing += 1
+            logger.info("MISSING %s", url)
+        else:
+            result_status = "ERROR"
+            error += 1
+            error_message = str(exc)
+            logger.error("ERROR %s: %s", url, exc)
+    except OSError as exc:
+        result_status = "ERROR"
+        error += 1
+        error_message = f"Filesystem error: {exc}"
+        logger.error("ERROR %s: %s", url, exc)
+
+    if result_status != "DOWNLOADED":
+        _record_manual_document(
+            store,
+            doc_key,
+            url,
+            now,
+            None,
+            None,
+            None,
+            result_status,
+            http_status,
+            error_message,
+        )
+
+    summary = FetchSummary(
+        checked=checked,
+        downloaded=downloaded,
+        missing=missing,
+        error=error,
+        changed_hash=changed_hash,
+    )
+    _update_state(state, data_dir, summary, [], {}, True)
+    return summary
+
+
 def _plan_documents(config: Config, options: FetchOptions) -> list[PlannedDoc]:
     mode = options.mode.lower()
     docs: list[PlannedDoc] = []
@@ -275,6 +393,36 @@ def _record_document(
         doc_family=entry.doc_family,
         year=entry.year,
         number=entry.number,
+        first_seen_at=last_checked_at,
+        last_checked_at=last_checked_at,
+        last_downloaded_at=last_downloaded_at,
+        latest_sha256=latest_sha256,
+        latest_pdf_path=latest_pdf_path,
+        status=status,
+        http_status=http_status,
+        error_message=error_message,
+    )
+    store.upsert(record)
+
+
+def _record_manual_document(
+    store: DocumentStore,
+    doc_key: str,
+    url: str,
+    last_checked_at: str,
+    last_downloaded_at: str | None,
+    latest_sha256: str | None,
+    latest_pdf_path: str | None,
+    status: str,
+    http_status: int | None,
+    error_message: str | None,
+) -> None:
+    record = DocumentRecord(
+        doc_key=doc_key,
+        url=url,
+        doc_family="MANUAL",
+        year=None,
+        number=None,
         first_seen_at=last_checked_at,
         last_checked_at=last_checked_at,
         last_downloaded_at=last_downloaded_at,

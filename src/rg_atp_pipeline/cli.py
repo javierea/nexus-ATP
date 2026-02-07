@@ -9,48 +9,17 @@ from pathlib import Path
 import typer
 from pydantic import ValidationError
 
-from .config import Config, default_config, load_config, save_config
+from .config import Config, load_config
 from .fetcher import FetchOptions, run_fetch
 from .logging_utils import setup_logging
 from .paths import config_path, data_dir, state_path
 from .planner import plan_all
+from .project import init_project
 from .storage_sqlite import DocumentStore
-from .state import State, default_state, load_state, save_state
+from .state import State, load_state
+from .web_ui import run_ui
 
 app = typer.Typer(help="rg_atp_pipeline CLI (Etapa 0)")
-
-
-
-def ensure_dirs() -> None:
-    """Ensure required directory structure exists."""
-    base = data_dir()
-    for sub in [
-        "raw_pdfs",
-        "raw_pdfs/latest",
-        "raw_text",
-        "structured",
-        "state",
-        "logs",
-        "tmp",
-    ]:
-        (base / sub).mkdir(parents=True, exist_ok=True)
-
-
-
-def init_project() -> None:
-    """Initialize folders, config, and state if missing."""
-    ensure_dirs()
-
-    cfg_path = config_path()
-    if not cfg_path.exists():
-        save_config(default_config(), cfg_path)
-
-    st_path = state_path()
-    if not st_path.exists():
-        save_state(default_state(), st_path)
-
-    store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
-    store.initialize()
 
 
 
@@ -153,6 +122,17 @@ def fetch(
         logging.getLogger("rg_atp_pipeline"),
     )
     typer.echo(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
+
+
+@app.command("ui")
+def ui(
+    host: str = typer.Option("127.0.0.1", help="Host para el servidor UI."),
+    port: int = typer.Option(8000, help="Puerto para el servidor UI."),
+) -> None:
+    """Launch minimal web UI for inventory and actions."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    run_ui(host, port)
 
 
 @app.callback()

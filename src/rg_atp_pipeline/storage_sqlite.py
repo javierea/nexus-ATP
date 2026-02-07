@@ -91,6 +91,50 @@ class DocumentStore:
             return None
         return DocumentLookup(status=row[0], latest_pdf_path=row[1], latest_sha256=row[2])
 
+    def list_records(self, limit: int = 200) -> list[DocumentRecord]:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    doc_key,
+                    url,
+                    doc_family,
+                    year,
+                    number,
+                    first_seen_at,
+                    last_checked_at,
+                    last_downloaded_at,
+                    latest_sha256,
+                    latest_pdf_path,
+                    status,
+                    http_status,
+                    error_message
+                FROM documents
+                ORDER BY last_checked_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [
+            DocumentRecord(
+                doc_key=row[0],
+                url=row[1],
+                doc_family=row[2],
+                year=row[3],
+                number=row[4],
+                first_seen_at=row[5],
+                last_checked_at=row[6],
+                last_downloaded_at=row[7],
+                latest_sha256=row[8],
+                latest_pdf_path=row[9],
+                status=row[10],
+                http_status=row[11],
+                error_message=row[12],
+            )
+            for row in rows
+        ]
+
     def upsert(self, record: DocumentRecord) -> None:
         with self._connect() as conn:
             conn.execute(
