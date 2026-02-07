@@ -27,6 +27,15 @@ class DocumentRecord:
     error_message: str | None
 
 
+@dataclass(frozen=True)
+class DocumentLookup:
+    """Minimal document lookup for skip checks."""
+
+    status: str
+    latest_pdf_path: str | None
+    latest_sha256: str | None
+
+
 class DocumentStore:
     """SQLite-backed document registry."""
 
@@ -66,6 +75,21 @@ class DocumentStore:
             )
             row = cur.fetchone()
         return row[0] if row else None
+
+    def get_record(self, doc_key: str) -> Optional[DocumentLookup]:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT status, latest_pdf_path, latest_sha256
+                FROM documents
+                WHERE doc_key = ?
+                """,
+                (doc_key,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return DocumentLookup(status=row[0], latest_pdf_path=row[1], latest_sha256=row[2])
 
     def upsert(self, record: DocumentRecord) -> None:
         with self._connect() as conn:

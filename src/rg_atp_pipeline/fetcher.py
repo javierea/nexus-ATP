@@ -46,6 +46,7 @@ class FetchOptions:
     old_end: int | None
     dry_run: bool
     max_downloads: int | None
+    skip_existing: bool
 
 
 def run_fetch(
@@ -59,6 +60,11 @@ def run_fetch(
     store.initialize()
     planned = _plan_documents(config, options)
     logger.info("Planificadas %s URLs (modo=%s)", len(planned), options.mode)
+
+    found_old_numbers: set[int] = set()
+    if options.skip_existing:
+        planned = _filter_existing(planned, store, found_old_numbers, logger)
+        logger.info("Restantes %s URLs tras omitir descargadas.", len(planned))
 
     if options.dry_run:
         return FetchSummary(checked=len(planned), downloaded=0, missing=0, error=0, changed_hash=0)
@@ -86,7 +92,6 @@ def run_fetch(
     changed_hash = 0
     stop_due_to_max = False
     per_year_status: dict[int, list[str]] = {}
-    found_old_numbers: set[int] = set()
     old_number_cutoff: int | None = None
     current_old_number: int | None = None
     current_old_found = False
@@ -225,6 +230,32 @@ def _plan_documents(config: Config, options: FetchOptions) -> list[PlannedDoc]:
             )
         )
     return docs
+
+
+def _filter_existing(
+    planned: Iterable[PlannedDoc],
+    store: DocumentStore,
+    found_old_numbers: set[int],
+    logger: logging.Logger,
+) -> list[PlannedDoc]:
+    filtered: list[PlannedDoc] = []
+    skipped = 0
+    for entry in planned:
+        record = store.get_record(entry.doc_key)
+        if (
+            record
+            and record.status == "DOWNLOADED"
+            and record.latest_pdf_path
+            and Path(record.latest_pdf_path).exists()
+        ):
+            skipped += 1
+            if entry.doc_family == "OLD" and entry.number is not None:
+                found_old_numbers.add(entry.number)
+            continue
+        filtered.append(entry)
+    if skipped:
+        logger.info("Omitidas %s entradas ya descargadas.", skipped)
+    return filtered
 
 
 def _record_document(
