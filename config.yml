@@ -18,3 +18,7 @@ request_timeout_sec: 30
 retry:
   max_attempts: 3
   backoff_sec: 2
+text_quality:
+  min_chars_total: 300
+  min_chars_per_page: 50
+  min_alpha_ratio: 0.5

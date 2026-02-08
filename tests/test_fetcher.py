@@ -4,7 +4,7 @@ from pathlib import Path
 
 import responses
 
-from rg_atp_pipeline.config import Config, OldRange, RetryPolicy
+from rg_atp_pipeline.config import Config, OldRange, RetryPolicy, TextQualityConfig
 from rg_atp_pipeline.fetcher import FetchOptions, run_fetch
 from rg_atp_pipeline.paths import data_dir, state_path
 from rg_atp_pipeline.state import default_state, save_state
@@ -26,6 +26,11 @@ def _config(base_url_old: str) -> Config:
         verify_last_k=5,
         request_timeout_sec=5,
         retry=RetryPolicy(max_attempts=1, backoff_sec=0),
+        text_quality=TextQualityConfig(
+            min_chars_total=1,
+            min_chars_per_page=1,
+            min_alpha_ratio=0.0,
+        ),
     )
 
 
@@ -157,6 +162,11 @@ def test_old_suffix_year_cuts_off_higher_years(monkeypatch, tmp_path: Path) -> N
         verify_last_k=5,
         request_timeout_sec=5,
         retry=RetryPolicy(max_attempts=1, backoff_sec=0),
+        text_quality=TextQualityConfig(
+            min_chars_total=1,
+            min_chars_per_page=1,
+            min_alpha_ratio=0.0,
+        ),
     )
     store = _setup_state(tmp_path)
 

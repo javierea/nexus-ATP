@@ -14,6 +14,7 @@ from .fetcher import FetchOptions, run_fetch, run_manual_fetch
 from .paths import config_path, data_dir, state_path
 from .state import load_state
 from .storage_sqlite import DocumentStore
+from .text_extractor import ExtractOptions, run_extract
 
 
 def run_ui(host: str, port: int) -> None:
@@ -43,6 +44,9 @@ class _RGHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/manual-fetch":
             self._handle_manual_fetch()
+            return
+        if parsed.path == "/extract":
+            self._handle_extract()
             return
         if parsed.path == "/delete-record":
             self._handle_delete_record()
@@ -128,6 +132,33 @@ class _RGHandler(BaseHTTPRequestHandler):
         message = f"Registro eliminado ({doc_key})." if deleted else f"No se encontró {doc_key}."
         self._render_home(message=message)
 
+    def _handle_extract(self) -> None:
+        data = self._read_form()
+        doc_key = _first(data, "doc_key", "").strip() or None
+        status = _first(data, "status", "DOWNLOADED")
+        limit = _parse_int(_first(data, "limit", "")) if _first(data, "limit", "") else None
+        force = "force" in data
+        only_text = "only_text" in data
+        only_needs_ocr = "only_needs_ocr" in data
+        config = load_config(config_path())
+        store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
+        summary = run_extract(
+            config,
+            store,
+            data_dir(),
+            ExtractOptions(
+                status=status,
+                limit=limit,
+                doc_key=doc_key,
+                force=force,
+                only_text=only_text,
+                only_needs_ocr=only_needs_ocr,
+            ),
+            logging.getLogger("rg_atp_pipeline.ui"),
+        )
+        message = f"Extracción completada: {summary.as_dict()}"
+        self._render_home(message=message)
+
     def _render_home(self, message: str | None) -> None:
         store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
         records = store.list_records(limit=200)
@@ -206,12 +237,14 @@ def _render_page(
         <th>Status</th>
         <th>Última revisión</th>
         <th>Última descarga</th>
+        <th>Text status</th>
+        <th>Needs OCR</th>
         <th>URL</th>
         <th>Acciones</th>
       </tr>
     </thead>
     <tbody>
-      {rows if rows else "<tr><td colspan='9'>Sin registros.</td></tr>"}
+      {rows if rows else "<tr><td colspan='11'>Sin registros.</td></tr>"}
     </tbody>
   </table>
 
@@ -277,12 +310,32 @@ def _render_page(
       </form>
       <p class="small">Registra la URL en el inventario con familia MANUAL.</p>
     </div>
+    <div class="panel">
+      <h2>Extracción de texto</h2>
+      <form method="post" action="/extract">
+        <label>Doc key (opcional)
+          <input type="text" name="doc_key" placeholder="DOC-KEY" />
+        </label>
+        <label>Status
+          <input type="text" name="status" value="DOWNLOADED" />
+        </label>
+        <label>Límite
+          <input type="number" name="limit" min="1" />
+        </label>
+        <label><input type="checkbox" name="force" /> Reprocesar</label>
+        <label><input type="checkbox" name="only_text" /> Solo EXTRACTED</label>
+        <label><input type="checkbox" name="only_needs_ocr" /> Solo NEEDS_OCR</label>
+        <button type="submit">Ejecutar extract</button>
+      </form>
+      <p class="small">Extrae texto crudo y marca NEEDS_OCR según config.</p>
+    </div>
   </div>
 </body>
 </html>"""
 
 
 def _render_record_row(record) -> str:
+    needs_ocr = "Sí" if record.text_status == "NEEDS_OCR" else "No"
     return (
         "<tr>"
         f"<td>{html.escape(record.doc_key)}</td>"
@@ -292,6 +345,8 @@ def _render_record_row(record) -> str:
         f"<td>{html.escape(record.status)}</td>"
         f"<td>{html.escape(record.last_checked_at)}</td>"
         f"<td>{html.escape(record.last_downloaded_at or '')}</td>"
+        f"<td>{html.escape(record.text_status)}</td>"
+        f"<td>{html.escape(needs_ocr)}</td>"
         f"<td><a href='{html.escape(record.url)}' target='_blank'>link</a></td>"
         "<td>"
         "<form method='post' action='/delete-record' class='delete-form'>"

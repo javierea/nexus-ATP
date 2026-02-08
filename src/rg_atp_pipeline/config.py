@@ -36,6 +36,14 @@ class RetryPolicy(BaseModel):
     backoff_sec: int = Field(..., ge=0)
 
 
+class TextQualityConfig(BaseModel):
+    """Thresholds for text extraction quality checks."""
+
+    min_chars_total: int = Field(..., ge=0)
+    min_chars_per_page: int = Field(..., ge=0)
+    min_alpha_ratio: float = Field(..., ge=0, le=1)
+
+
 class Config(BaseModel):
     """Root configuration model for rg_atp_pipeline."""
 
@@ -52,6 +60,7 @@ class Config(BaseModel):
     verify_last_k: int = Field(..., ge=0)
     request_timeout_sec: int = Field(..., ge=1)
     retry: RetryPolicy
+    text_quality: TextQualityConfig
 
 
 def default_config() -> Config:
@@ -70,6 +79,11 @@ def default_config() -> Config:
         verify_last_k=5,
         request_timeout_sec=30,
         retry=RetryPolicy(max_attempts=3, backoff_sec=2),
+        text_quality=TextQualityConfig(
+            min_chars_total=300,
+            min_chars_per_page=50,
+            min_alpha_ratio=0.5,
+        ),
     )
 
 

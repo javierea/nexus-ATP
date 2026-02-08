@@ -14,6 +14,7 @@ def ensure_dirs() -> None:
     for sub in [
         "raw_pdfs",
         "raw_pdfs/latest",
+        "text",
         "raw_text",
         "structured",
         "state",
