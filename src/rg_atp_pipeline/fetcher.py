@@ -419,6 +419,13 @@ def _record_document(
         status=status,
         http_status=http_status,
         error_message=error_message,
+        text_status="NONE",
+        text_path=None,
+        text_extracted_at=None,
+        char_count=None,
+        pages_total=None,
+        pages_with_text=None,
+        alpha_ratio=None,
     )
     store.upsert(record)
 
@@ -451,6 +458,13 @@ def _record_manual_document(
         status=status,
         http_status=http_status,
         error_message=error_message,
+        text_status="NONE",
+        text_path=None,
+        text_extracted_at=None,
+        char_count=None,
+        pages_total=None,
+        pages_with_text=None,
+        alpha_ratio=None,
     )
     store.upsert(record)
 

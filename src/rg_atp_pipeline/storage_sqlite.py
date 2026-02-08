@@ -25,6 +25,13 @@ class DocumentRecord:
     status: str
     http_status: int | None
     error_message: str | None
+    text_status: str
+    text_path: str | None
+    text_extracted_at: str | None
+    char_count: int | None
+    pages_total: int | None
+    pages_with_text: int | None
+    alpha_ratio: float | None
 
 
 @dataclass(frozen=True)
@@ -61,9 +68,38 @@ class DocumentStore:
                     latest_pdf_path TEXT,
                     status TEXT NOT NULL,
                     http_status INTEGER,
-                    error_message TEXT
+                    error_message TEXT,
+                    text_status TEXT,
+                    text_path TEXT,
+                    text_extracted_at TEXT,
+                    char_count INTEGER,
+                    pages_total INTEGER,
+                    pages_with_text INTEGER,
+                    alpha_ratio REAL
                 )
                 """
+            )
+            conn.commit()
+        self.migrate()
+
+    def migrate(self) -> None:
+        """Ensure schema includes text extraction columns."""
+        with self._connect() as conn:
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
+            to_add = [
+                ("text_status", "TEXT"),
+                ("text_path", "TEXT"),
+                ("text_extracted_at", "TEXT"),
+                ("char_count", "INTEGER"),
+                ("pages_total", "INTEGER"),
+                ("pages_with_text", "INTEGER"),
+                ("alpha_ratio", "REAL"),
+            ]
+            for column, col_type in to_add:
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE documents ADD COLUMN {column} {col_type}")
+            conn.execute(
+                "UPDATE documents SET text_status = 'NONE' WHERE text_status IS NULL"
             )
             conn.commit()
 
@@ -108,7 +144,14 @@ class DocumentStore:
                     latest_pdf_path,
                     status,
                     http_status,
-                    error_message
+                    error_message,
+                    text_status,
+                    text_path,
+                    text_extracted_at,
+                    char_count,
+                    pages_total,
+                    pages_with_text,
+                    alpha_ratio
                 FROM documents
                 ORDER BY last_checked_at DESC
                 LIMIT ?
@@ -131,6 +174,147 @@ class DocumentStore:
                 status=row[10],
                 http_status=row[11],
                 error_message=row[12],
+                text_status=row[13] or "NONE",
+                text_path=row[14],
+                text_extracted_at=row[15],
+                char_count=row[16],
+                pages_total=row[17],
+                pages_with_text=row[18],
+                alpha_ratio=row[19],
+            )
+            for row in rows
+        ]
+
+    def get_document(self, doc_key: str) -> Optional[DocumentRecord]:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    doc_key,
+                    url,
+                    doc_family,
+                    year,
+                    number,
+                    first_seen_at,
+                    last_checked_at,
+                    last_downloaded_at,
+                    latest_sha256,
+                    latest_pdf_path,
+                    status,
+                    http_status,
+                    error_message,
+                    text_status,
+                    text_path,
+                    text_extracted_at,
+                    char_count,
+                    pages_total,
+                    pages_with_text,
+                    alpha_ratio
+                FROM documents
+                WHERE doc_key = ?
+                """,
+                (doc_key,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return DocumentRecord(
+            doc_key=row[0],
+            url=row[1],
+            doc_family=row[2],
+            year=row[3],
+            number=row[4],
+            first_seen_at=row[5],
+            last_checked_at=row[6],
+            last_downloaded_at=row[7],
+            latest_sha256=row[8],
+            latest_pdf_path=row[9],
+            status=row[10],
+            http_status=row[11],
+            error_message=row[12],
+            text_status=row[13] or "NONE",
+            text_path=row[14],
+            text_extracted_at=row[15],
+            char_count=row[16],
+            pages_total=row[17],
+            pages_with_text=row[18],
+            alpha_ratio=row[19],
+        )
+
+    def list_text_candidates(
+        self,
+        status: str | None,
+        limit: int | None,
+        doc_key: str | None,
+        only_text_status: str | None,
+    ) -> list[DocumentRecord]:
+        where = []
+        params: list[object] = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        if doc_key:
+            where.append("doc_key = ?")
+            params.append(doc_key)
+        if only_text_status:
+            where.append("COALESCE(text_status, 'NONE') = ?")
+            params.append(only_text_status)
+        clause = " AND ".join(where) if where else "1=1"
+        limit_clause = f"LIMIT {limit}" if limit is not None else ""
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"""
+                SELECT
+                    doc_key,
+                    url,
+                    doc_family,
+                    year,
+                    number,
+                    first_seen_at,
+                    last_checked_at,
+                    last_downloaded_at,
+                    latest_sha256,
+                    latest_pdf_path,
+                    status,
+                    http_status,
+                    error_message,
+                    text_status,
+                    text_path,
+                    text_extracted_at,
+                    char_count,
+                    pages_total,
+                    pages_with_text,
+                    alpha_ratio
+                FROM documents
+                WHERE {clause}
+                ORDER BY last_checked_at DESC
+                {limit_clause}
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+        return [
+            DocumentRecord(
+                doc_key=row[0],
+                url=row[1],
+                doc_family=row[2],
+                year=row[3],
+                number=row[4],
+                first_seen_at=row[5],
+                last_checked_at=row[6],
+                last_downloaded_at=row[7],
+                latest_sha256=row[8],
+                latest_pdf_path=row[9],
+                status=row[10],
+                http_status=row[11],
+                error_message=row[12],
+                text_status=row[13] or "NONE",
+                text_path=row[14],
+                text_extracted_at=row[15],
+                char_count=row[16],
+                pages_total=row[17],
+                pages_with_text=row[18],
+                alpha_ratio=row[19],
             )
             for row in rows
         ]
@@ -158,9 +342,16 @@ class DocumentStore:
                     latest_pdf_path,
                     status,
                     http_status,
-                    error_message
+                    error_message,
+                    text_status,
+                    text_path,
+                    text_extracted_at,
+                    char_count,
+                    pages_total,
+                    pages_with_text,
+                    alpha_ratio
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(doc_key) DO UPDATE SET
                     url = excluded.url,
                     doc_family = excluded.doc_family,
@@ -173,7 +364,20 @@ class DocumentStore:
                     latest_pdf_path = excluded.latest_pdf_path,
                     status = excluded.status,
                     http_status = excluded.http_status,
-                    error_message = excluded.error_message
+                    error_message = excluded.error_message,
+                    text_status = COALESCE(documents.text_status, excluded.text_status),
+                    text_path = COALESCE(documents.text_path, excluded.text_path),
+                    text_extracted_at = COALESCE(
+                        documents.text_extracted_at,
+                        excluded.text_extracted_at
+                    ),
+                    char_count = COALESCE(documents.char_count, excluded.char_count),
+                    pages_total = COALESCE(documents.pages_total, excluded.pages_total),
+                    pages_with_text = COALESCE(
+                        documents.pages_with_text,
+                        excluded.pages_with_text
+                    ),
+                    alpha_ratio = COALESCE(documents.alpha_ratio, excluded.alpha_ratio)
                 """,
                 (
                     record.doc_key,
@@ -189,6 +393,51 @@ class DocumentStore:
                     record.status,
                     record.http_status,
                     record.error_message,
+                    record.text_status,
+                    record.text_path,
+                    record.text_extracted_at,
+                    record.char_count,
+                    record.pages_total,
+                    record.pages_with_text,
+                    record.alpha_ratio,
+                ),
+            )
+            conn.commit()
+
+    def update_text_info(
+        self,
+        doc_key: str,
+        text_status: str,
+        text_path: str | None,
+        text_extracted_at: str | None,
+        char_count: int | None,
+        pages_total: int | None,
+        pages_with_text: int | None,
+        alpha_ratio: float | None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE documents
+                SET
+                    text_status = ?,
+                    text_path = ?,
+                    text_extracted_at = ?,
+                    char_count = ?,
+                    pages_total = ?,
+                    pages_with_text = ?,
+                    alpha_ratio = ?
+                WHERE doc_key = ?
+                """,
+                (
+                    text_status,
+                    text_path,
+                    text_extracted_at,
+                    char_count,
+                    pages_total,
+                    pages_with_text,
+                    alpha_ratio,
+                    doc_key,
                 ),
             )
             conn.commit()

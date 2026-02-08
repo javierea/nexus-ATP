@@ -17,6 +17,7 @@ from .planner import plan_all
 from .project import init_project
 from .storage_sqlite import DocumentStore
 from .state import State, load_state
+from .text_extractor import ExtractOptions, run_extract
 from .web_ui import run_ui
 
 app = typer.Typer(help="rg_atp_pipeline CLI (Etapa 0)")
@@ -118,6 +119,37 @@ def fetch(
             dry_run=dry_run,
             max_downloads=max_downloads,
             skip_existing=skip_existing,
+        ),
+        logging.getLogger("rg_atp_pipeline"),
+    )
+    typer.echo(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
+
+
+@app.command("extract")
+def extract(
+    doc_key: str | None = typer.Option(None, help="Procesar un doc_key específico."),
+    status: str = typer.Option("DOWNLOADED", help="Status de documentos a procesar."),
+    limit: int | None = typer.Option(None, help="Máximo de documentos a procesar."),
+    force: bool = typer.Option(False, help="Reprocesar aunque ya exista texto."),
+    only_text: bool = typer.Option(False, help="Solo documentos con text_status=EXTRACTED."),
+    only_needs_ocr: bool = typer.Option(False, help="Solo documentos con text_status=NEEDS_OCR."),
+) -> None:
+    """Extract raw text from PDFs (Etapa 2)."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    config = load_config(config_path())
+    store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
+    summary = run_extract(
+        config,
+        store,
+        data_dir(),
+        ExtractOptions(
+            status=status,
+            limit=limit,
+            doc_key=doc_key,
+            force=force,
+            only_text=only_text,
+            only_needs_ocr=only_needs_ocr,
         ),
         logging.getLogger("rg_atp_pipeline"),
     )
