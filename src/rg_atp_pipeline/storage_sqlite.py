@@ -32,6 +32,10 @@ class DocumentRecord:
     pages_total: int | None
     pages_with_text: int | None
     alpha_ratio: float | None
+    structure_status: str | None = None
+    structure_confidence: float | None = None
+    articles_detected: int | None = None
+    annexes_detected: int | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,36 @@ class DocumentLookup:
     status: str
     latest_pdf_path: str | None
     latest_sha256: str | None
+
+
+@dataclass(frozen=True)
+class DocStructureRecord:
+    """Structured document metadata."""
+
+    doc_key: str
+    structure_status: str
+    structure_confidence: float | None
+    articles_detected: int | None
+    annexes_detected: int | None
+    notes: str | None
+    structured_at: str | None
+
+
+@dataclass(frozen=True)
+class UnitRecord:
+    """Structured unit record."""
+
+    id: int
+    doc_key: str
+    unit_type: str
+    unit_number: str | None
+    title: str | None
+    text: str
+    start_char: int | None
+    end_char: int | None
+    start_line: int | None
+    end_line: int | None
+    created_at: str
 
 
 class DocumentStore:
@@ -101,6 +135,36 @@ class DocumentStore:
             conn.execute(
                 "UPDATE documents SET text_status = 'NONE' WHERE text_status IS NULL"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS doc_structure (
+                    doc_key TEXT PRIMARY KEY,
+                    structure_status TEXT NOT NULL,
+                    structure_confidence REAL,
+                    articles_detected INTEGER,
+                    annexes_detected INTEGER,
+                    notes TEXT,
+                    structured_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS units (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_key TEXT NOT NULL,
+                    unit_type TEXT NOT NULL,
+                    unit_number TEXT,
+                    title TEXT,
+                    text TEXT NOT NULL,
+                    start_char INTEGER,
+                    end_char INTEGER,
+                    start_line INTEGER,
+                    end_line INTEGER,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def get_latest_sha(self, doc_key: str) -> Optional[str]:
@@ -132,28 +196,33 @@ class DocumentStore:
             cur = conn.execute(
                 """
                 SELECT
-                    doc_key,
-                    url,
-                    doc_family,
-                    year,
-                    number,
-                    first_seen_at,
-                    last_checked_at,
-                    last_downloaded_at,
-                    latest_sha256,
-                    latest_pdf_path,
-                    status,
-                    http_status,
-                    error_message,
-                    text_status,
-                    text_path,
-                    text_extracted_at,
-                    char_count,
-                    pages_total,
-                    pages_with_text,
-                    alpha_ratio
-                FROM documents
-                ORDER BY last_checked_at DESC
+                    d.doc_key,
+                    d.url,
+                    d.doc_family,
+                    d.year,
+                    d.number,
+                    d.first_seen_at,
+                    d.last_checked_at,
+                    d.last_downloaded_at,
+                    d.latest_sha256,
+                    d.latest_pdf_path,
+                    d.status,
+                    d.http_status,
+                    d.error_message,
+                    d.text_status,
+                    d.text_path,
+                    d.text_extracted_at,
+                    d.char_count,
+                    d.pages_total,
+                    d.pages_with_text,
+                    d.alpha_ratio,
+                    s.structure_status,
+                    s.structure_confidence,
+                    s.articles_detected,
+                    s.annexes_detected
+                FROM documents d
+                LEFT JOIN doc_structure s ON d.doc_key = s.doc_key
+                ORDER BY d.last_checked_at DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -181,6 +250,10 @@ class DocumentStore:
                 pages_total=row[17],
                 pages_with_text=row[18],
                 alpha_ratio=row[19],
+                structure_status=row[20],
+                structure_confidence=row[21],
+                articles_detected=row[22],
+                annexes_detected=row[23],
             )
             for row in rows
         ]
@@ -190,28 +263,33 @@ class DocumentStore:
             cur = conn.execute(
                 """
                 SELECT
-                    doc_key,
-                    url,
-                    doc_family,
-                    year,
-                    number,
-                    first_seen_at,
-                    last_checked_at,
-                    last_downloaded_at,
-                    latest_sha256,
-                    latest_pdf_path,
-                    status,
-                    http_status,
-                    error_message,
-                    text_status,
-                    text_path,
-                    text_extracted_at,
-                    char_count,
-                    pages_total,
-                    pages_with_text,
-                    alpha_ratio
-                FROM documents
-                WHERE doc_key = ?
+                    d.doc_key,
+                    d.url,
+                    d.doc_family,
+                    d.year,
+                    d.number,
+                    d.first_seen_at,
+                    d.last_checked_at,
+                    d.last_downloaded_at,
+                    d.latest_sha256,
+                    d.latest_pdf_path,
+                    d.status,
+                    d.http_status,
+                    d.error_message,
+                    d.text_status,
+                    d.text_path,
+                    d.text_extracted_at,
+                    d.char_count,
+                    d.pages_total,
+                    d.pages_with_text,
+                    d.alpha_ratio,
+                    s.structure_status,
+                    s.structure_confidence,
+                    s.articles_detected,
+                    s.annexes_detected
+                FROM documents d
+                LEFT JOIN doc_structure s ON d.doc_key = s.doc_key
+                WHERE d.doc_key = ?
                 """,
                 (doc_key,),
             )
@@ -239,6 +317,10 @@ class DocumentStore:
             pages_total=row[17],
             pages_with_text=row[18],
             alpha_ratio=row[19],
+            structure_status=row[20],
+            structure_confidence=row[21],
+            articles_detected=row[22],
+            annexes_detected=row[23],
         )
 
     def list_text_candidates(
@@ -441,6 +523,156 @@ class DocumentStore:
                 ),
             )
             conn.commit()
+
+    def upsert_doc_structure(
+        self,
+        record: DocStructureRecord,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO doc_structure (
+                    doc_key,
+                    structure_status,
+                    structure_confidence,
+                    articles_detected,
+                    annexes_detected,
+                    notes,
+                    structured_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(doc_key) DO UPDATE SET
+                    structure_status = excluded.structure_status,
+                    structure_confidence = excluded.structure_confidence,
+                    articles_detected = excluded.articles_detected,
+                    annexes_detected = excluded.annexes_detected,
+                    notes = excluded.notes,
+                    structured_at = excluded.structured_at
+                """,
+                (
+                    record.doc_key,
+                    record.structure_status,
+                    record.structure_confidence,
+                    record.articles_detected,
+                    record.annexes_detected,
+                    record.notes,
+                    record.structured_at,
+                ),
+            )
+            conn.commit()
+
+    def get_doc_structure(self, doc_key: str) -> DocStructureRecord | None:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    doc_key,
+                    structure_status,
+                    structure_confidence,
+                    articles_detected,
+                    annexes_detected,
+                    notes,
+                    structured_at
+                FROM doc_structure
+                WHERE doc_key = ?
+                """,
+                (doc_key,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return DocStructureRecord(
+            doc_key=row[0],
+            structure_status=row[1],
+            structure_confidence=row[2],
+            articles_detected=row[3],
+            annexes_detected=row[4],
+            notes=row[5],
+            structured_at=row[6],
+        )
+
+    def delete_units(self, doc_key: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM units WHERE doc_key = ?", (doc_key,))
+            conn.commit()
+
+    def insert_units(self, units: list[UnitRecord]) -> None:
+        if not units:
+            return
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO units (
+                    doc_key,
+                    unit_type,
+                    unit_number,
+                    title,
+                    text,
+                    start_char,
+                    end_char,
+                    start_line,
+                    end_line,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        unit.doc_key,
+                        unit.unit_type,
+                        unit.unit_number,
+                        unit.title,
+                        unit.text,
+                        unit.start_char,
+                        unit.end_char,
+                        unit.start_line,
+                        unit.end_line,
+                        unit.created_at,
+                    )
+                    for unit in units
+                ],
+            )
+            conn.commit()
+
+    def list_units(self, doc_key: str) -> list[UnitRecord]:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    id,
+                    doc_key,
+                    unit_type,
+                    unit_number,
+                    title,
+                    text,
+                    start_char,
+                    end_char,
+                    start_line,
+                    end_line,
+                    created_at
+                FROM units
+                WHERE doc_key = ?
+                ORDER BY id
+                """,
+                (doc_key,),
+            )
+            rows = cur.fetchall()
+        return [
+            UnitRecord(
+                id=row[0],
+                doc_key=row[1],
+                unit_type=row[2],
+                unit_number=row[3],
+                title=row[4],
+                text=row[5],
+                start_char=row[6],
+                end_char=row[7],
+                start_line=row[8],
+                end_line=row[9],
+                created_at=row[10],
+            )
+            for row in rows
+        ]
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self._db_path)

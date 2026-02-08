@@ -1,4 +1,4 @@
-# rg_atp_pipeline (Etapa 2)
+# rg_atp_pipeline (Etapa 3)
 
 Proyecto base para la descarga y procesamiento de PDFs ATP. En esta etapa se incorpora la extracción de texto crudo, métricas de calidad y marcado para OCR.
 
@@ -49,6 +49,9 @@ python -m rg_atp_pipeline fetch --mode both --skip-existing
 python -m rg_atp_pipeline extract --status DOWNLOADED --limit 50
 python -m rg_atp_pipeline extract --doc-key RG-2024-001 --force
 python -m rg_atp_pipeline extract --only-needs-ocr
+python -m rg_atp_pipeline structure --limit 50
+python -m rg_atp_pipeline structure --doc-key RG-2024-001 --force
+python -m rg_atp_pipeline structure --include-needs-ocr --no-export-json
 python -m rg_atp_pipeline ui --host 127.0.0.1 --port 8000
 ```
 
@@ -58,4 +61,5 @@ python -m rg_atp_pipeline ui --host 127.0.0.1 --port 8000
 - `fetch` realiza HEAD/GET según configuración, guarda PDFs versionados en `data/raw_pdfs/` y actualiza SQLite en `data/state/rg_atp.sqlite`.
 - `fetch` puede omitir entradas ya descargadas con `--skip-existing` si el PDF local sigue disponible.
 - `extract` genera texto crudo por página en `data/text/`, calcula métricas y marca `NEEDS_OCR` cuando corresponde.
+- `structure` segmenta el texto crudo en unidades normativas (ARTÍCULO/ANEXO/secciones) y guarda unidades en SQLite, con export JSON opcional en `data/structured/`.
 - `ui` levanta una interfaz mínima para revisar inventario, ver config/estado y ejecutar fetches manuales o programados.

@@ -14,6 +14,7 @@ from .fetcher import FetchOptions, run_fetch, run_manual_fetch
 from .paths import config_path, data_dir, state_path
 from .state import load_state
 from .storage_sqlite import DocumentStore
+from .structure_segmenter import StructureOptions, run_structure
 from .text_extractor import ExtractOptions, run_extract
 
 
@@ -32,6 +33,9 @@ def run_ui(host: str, port: int) -> None:
 class _RGHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/structured":
+            self._handle_structured(parsed)
+            return
         if parsed.path != "/":
             self._send_text("Not Found", HTTPStatus.NOT_FOUND)
             return
@@ -47,6 +51,9 @@ class _RGHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/extract":
             self._handle_extract()
+            return
+        if parsed.path == "/structure":
+            self._handle_structure()
             return
         if parsed.path == "/delete-record":
             self._handle_delete_record()
@@ -159,6 +166,46 @@ class _RGHandler(BaseHTTPRequestHandler):
         message = f"Extracción completada: {summary.as_dict()}"
         self._render_home(message=message)
 
+    def _handle_structure(self) -> None:
+        data = self._read_form()
+        doc_key = _first(data, "doc_key", "").strip() or None
+        limit = _parse_int(_first(data, "limit", "")) if _first(data, "limit", "") else None
+        force = "force" in data
+        include_needs_ocr = "include_needs_ocr" in data
+        export_json = "export_json" in data
+        store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
+        summary = run_structure(
+            store,
+            data_dir(),
+            StructureOptions(
+                doc_key=doc_key,
+                limit=limit,
+                force=force,
+                include_needs_ocr=include_needs_ocr,
+                export_json=export_json,
+            ),
+            logging.getLogger("rg_atp_pipeline.ui"),
+        )
+        message = f"Estructura completada: {summary.as_dict()}"
+        self._render_home(message=message)
+
+    def _handle_structured(self, parsed) -> None:
+        params = parse_qs(parsed.query)
+        doc_key = _first(params, "doc_key", "").strip()
+        if not doc_key:
+            self._send_text("doc_key requerido", HTTPStatus.BAD_REQUEST)
+            return
+        json_path = data_dir() / "structured" / f"{doc_key}.json"
+        if not json_path.exists():
+            self._send_text("JSON no encontrado", HTTPStatus.NOT_FOUND)
+            return
+        content = json_path.read_text(encoding="utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(content.encode("utf-8"))))
+        self.end_headers()
+        self.wfile.write(content.encode("utf-8"))
+
     def _render_home(self, message: str | None) -> None:
         store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
         records = store.list_records(limit=200)
@@ -239,12 +286,15 @@ def _render_page(
         <th>Última descarga</th>
         <th>Text status</th>
         <th>Needs OCR</th>
+        <th>Structure status</th>
+        <th>Articles</th>
+        <th>Confidence</th>
         <th>URL</th>
         <th>Acciones</th>
       </tr>
     </thead>
     <tbody>
-      {rows if rows else "<tr><td colspan='11'>Sin registros.</td></tr>"}
+      {rows if rows else "<tr><td colspan='14'>Sin registros.</td></tr>"}
     </tbody>
   </table>
 
@@ -329,6 +379,22 @@ def _render_page(
       </form>
       <p class="small">Extrae texto crudo y marca NEEDS_OCR según config.</p>
     </div>
+    <div class="panel">
+      <h2>Estructurar</h2>
+      <form method="post" action="/structure">
+        <label>Doc key (opcional)
+          <input type="text" name="doc_key" placeholder="DOC-KEY" />
+        </label>
+        <label>Límite
+          <input type="number" name="limit" min="1" />
+        </label>
+        <label><input type="checkbox" name="force" /> Reprocesar</label>
+        <label><input type="checkbox" name="include_needs_ocr" /> Incluir NEEDS_OCR</label>
+        <label><input type="checkbox" name="export_json" checked /> Exportar JSON</label>
+        <button type="submit">Ejecutar structure</button>
+      </form>
+      <p class="small">Segmenta unidades normativas sin interpretación.</p>
+    </div>
   </div>
 </body>
 </html>"""
@@ -336,6 +402,16 @@ def _render_page(
 
 def _render_record_row(record) -> str:
     needs_ocr = "Sí" if record.text_status == "NEEDS_OCR" else "No"
+    structure_status = record.structure_status or "-"
+    articles_detected = record.articles_detected if record.articles_detected is not None else "-"
+    confidence = (
+        f"{record.structure_confidence:.2f}"
+        if record.structure_confidence is not None
+        else "-"
+    )
+    json_link = (
+        f"<a href='/structured?doc_key={html.escape(record.doc_key)}' target='_blank'>json</a>"
+    )
     return (
         "<tr>"
         f"<td>{html.escape(record.doc_key)}</td>"
@@ -347,8 +423,12 @@ def _render_record_row(record) -> str:
         f"<td>{html.escape(record.last_downloaded_at or '')}</td>"
         f"<td>{html.escape(record.text_status)}</td>"
         f"<td>{html.escape(needs_ocr)}</td>"
+        f"<td>{html.escape(str(structure_status))}</td>"
+        f"<td>{html.escape(str(articles_detected))}</td>"
+        f"<td>{html.escape(confidence)}</td>"
         f"<td><a href='{html.escape(record.url)}' target='_blank'>link</a></td>"
         "<td>"
+        f"{json_link} "
         "<form method='post' action='/delete-record' class='delete-form'>"
         f"<input type='hidden' name='doc_key' value='{html.escape(record.doc_key)}' />"
         "<button type='submit' class='delete-button' "
