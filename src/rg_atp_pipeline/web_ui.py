@@ -44,6 +44,9 @@ class _RGHandler(BaseHTTPRequestHandler):
         if parsed.path == "/manual-fetch":
             self._handle_manual_fetch()
             return
+        if parsed.path == "/delete-record":
+            self._handle_delete_record()
+            return
         self._send_text("Not Found", HTTPStatus.NOT_FOUND)
 
     def _handle_fetch(self) -> None:
@@ -92,6 +95,12 @@ class _RGHandler(BaseHTTPRequestHandler):
         if not url:
             self._render_home(message="URL manual vacía. Intenta nuevamente.")
             return
+        year = _parse_int(_first(data, "manual_year", "")) if _first(data, "manual_year", "") else None
+        number = (
+            _parse_int(_first(data, "manual_number", ""))
+            if _first(data, "manual_number", "")
+            else None
+        )
         config = load_config(config_path())
         state = load_state(state_path())
         store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
@@ -101,9 +110,22 @@ class _RGHandler(BaseHTTPRequestHandler):
             store,
             data_dir(),
             url,
+            year,
+            number,
             logging.getLogger("rg_atp_pipeline.ui"),
         )
         message = f"Fetch manual completado: {summary.as_dict()}"
+        self._render_home(message=message)
+
+    def _handle_delete_record(self) -> None:
+        data = self._read_form()
+        doc_key = _first(data, "doc_key", "").strip()
+        if not doc_key:
+            self._render_home(message="Doc key vacío. Intenta nuevamente.")
+            return
+        store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
+        deleted = store.delete_record(doc_key)
+        message = f"Registro eliminado ({doc_key})." if deleted else f"No se encontró {doc_key}."
         self._render_home(message=message)
 
     def _render_home(self, message: str | None) -> None:
@@ -166,6 +188,9 @@ def _render_page(
     input[type="text"], input[type="number"] {{ width: 100%; padding: 6px; }}
     .message {{ background: #eef6ff; padding: 8px; border-left: 4px solid #3b82f6; }}
     .small {{ font-size: 12px; color: #666; }}
+    .delete-form {{ margin: 0; }}
+    .delete-button {{ background: #ef4444; color: white; border: none; padding: 6px 10px; cursor: pointer; }}
+    .delete-button:hover {{ background: #dc2626; }}
   </style>
 </head>
 <body>
@@ -182,10 +207,11 @@ def _render_page(
         <th>Última revisión</th>
         <th>Última descarga</th>
         <th>URL</th>
+        <th>Acciones</th>
       </tr>
     </thead>
     <tbody>
-      {rows if rows else "<tr><td colspan='8'>Sin registros.</td></tr>"}
+      {rows if rows else "<tr><td colspan='9'>Sin registros.</td></tr>"}
     </tbody>
   </table>
 
@@ -241,6 +267,12 @@ def _render_page(
         <label>URL del PDF
           <input type="text" name="manual_url" placeholder="https://..." />
         </label>
+        <label>Año (opcional)
+          <input type="number" name="manual_year" min="1900" max="2100" />
+        </label>
+        <label>Número (opcional)
+          <input type="number" name="manual_number" min="1" />
+        </label>
         <button type="submit">Descargar URL</button>
       </form>
       <p class="small">Registra la URL en el inventario con familia MANUAL.</p>
@@ -261,6 +293,13 @@ def _render_record_row(record) -> str:
         f"<td>{html.escape(record.last_checked_at)}</td>"
         f"<td>{html.escape(record.last_downloaded_at or '')}</td>"
         f"<td><a href='{html.escape(record.url)}' target='_blank'>link</a></td>"
+        "<td>"
+        "<form method='post' action='/delete-record' class='delete-form'>"
+        f"<input type='hidden' name='doc_key' value='{html.escape(record.doc_key)}' />"
+        "<button type='submit' class='delete-button' "
+        "onclick=\"return confirm('¿Eliminar este registro?');\">Eliminar</button>"
+        "</form>"
+        "</td>"
         "</tr>"
     )
 
