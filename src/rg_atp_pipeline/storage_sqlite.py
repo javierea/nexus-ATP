@@ -135,6 +135,12 @@ class DocumentStore:
             for row in rows
         ]
 
+    def delete_record(self, doc_key: str) -> int:
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM documents WHERE doc_key = ?", (doc_key,))
+            conn.commit()
+            return cur.rowcount
+
     def upsert(self, record: DocumentRecord) -> None:
         with self._connect() as conn:
             conn.execute(

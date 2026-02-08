@@ -4,4 +4,7 @@ data/raw_text/
 data/tmp/
 data/logs/
 data/state/*.json
+data/state/*.sqlite
 data/raw_pdfs/latest/*.json
+src/**/*.txt
+*.pyc
