@@ -9,13 +9,13 @@ from typing import Any
 
 import streamlit as st
 
-from .cli import validate_config_state
-from .config import Config, load_config, save_config
-from .fetcher import FetchOptions, run_fetch
-from .logging_utils import setup_logging
-from .paths import config_path, data_dir, state_path
-from .project import init_project
-from .queries import (
+from rg_atp_pipeline.cli import validate_config_state
+from rg_atp_pipeline.config import Config, load_config, save_config
+from rg_atp_pipeline.fetcher import FetchOptions, run_fetch
+from rg_atp_pipeline.logging_utils import setup_logging
+from rg_atp_pipeline.paths import config_path, data_dir, state_path
+from rg_atp_pipeline.project import init_project
+from rg_atp_pipeline.queries import (
     get_confidence_distribution,
     get_filter_options,
     get_kpis,
@@ -23,10 +23,10 @@ from .queries import (
     list_documents,
     recent_activity,
 )
-from .state import load_state
-from .storage_sqlite import DocumentStore
-from .structure_segmenter import StructureOptions, run_structure
-from .text_extractor import ExtractOptions, run_extract
+from rg_atp_pipeline.state import load_state
+from rg_atp_pipeline.storage_sqlite import DocumentStore
+from rg_atp_pipeline.structure_segmenter import StructureOptions, run_structure
+from rg_atp_pipeline.text_extractor import ExtractOptions, run_extract
 
 
 st.set_page_config(page_title="RG ATP Control Panel", layout="wide")
