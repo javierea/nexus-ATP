@@ -17,10 +17,11 @@ from .planner import plan_all
 from .project import init_project
 from .storage_sqlite import DocumentStore
 from .state import State, load_state
+from .structure_segmenter import StructureOptions, run_structure
 from .text_extractor import ExtractOptions, run_extract
 from .web_ui import run_ui
 
-app = typer.Typer(help="rg_atp_pipeline CLI (Etapa 0)")
+app = typer.Typer(help="rg_atp_pipeline CLI (Etapa 3)")
 
 
 
@@ -165,6 +166,41 @@ def ui(
     setup_logging(data_dir() / "logs")
     init_project()
     run_ui(host, port)
+
+
+@app.command("structure")
+def structure(
+    doc_key: str | None = typer.Option(None, help="Procesar un doc_key específico."),
+    limit: int | None = typer.Option(None, help="Máximo de documentos a procesar."),
+    force: bool = typer.Option(False, help="Reprocesar aunque ya exista estructura."),
+    include_needs_ocr: bool = typer.Option(
+        False,
+        "--include-needs-ocr",
+        help="Incluir documentos NEEDS_OCR (por defecto solo EXTRACTED).",
+    ),
+    export_json: bool = typer.Option(
+        True,
+        "--export-json/--no-export-json",
+        help="Exportar JSON estructurado por documento.",
+    ),
+) -> None:
+    """Segmentar texto crudo en unidades (Etapa 3)."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
+    summary = run_structure(
+        store,
+        data_dir(),
+        StructureOptions(
+            doc_key=doc_key,
+            limit=limit,
+            force=force,
+            include_needs_ocr=include_needs_ocr,
+            export_json=export_json,
+        ),
+        logging.getLogger("rg_atp_pipeline"),
+    )
+    typer.echo(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
 
 
 @app.callback()
