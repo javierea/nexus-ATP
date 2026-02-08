@@ -487,6 +487,11 @@ def render_audit(db_path: Path) -> None:
     st.subheader("Depurar missing_downloads con Ollama")
     enable_review = st.toggle("Activar LLM (Ollama local)", value=False)
     if enable_review:
+        base_url = st.text_input(
+            "Base URL Ollama",
+            value="http://localhost:11434",
+            help="Ej: http://localhost:11434 o http://localhost:11434/api/chat",
+        )
         model = st.selectbox(
             "Modelo",
             [
@@ -510,6 +515,7 @@ def render_audit(db_path: Path) -> None:
                 model=model,
                 temperature=float(temperature),
                 max_tokens=int(max_tokens) if max_tokens else None,
+                base_url=base_url,
             )
             reviewer = OllamaReviewer(OllamaClient(config))
             try:

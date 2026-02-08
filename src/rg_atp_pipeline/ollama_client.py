@@ -39,9 +39,11 @@ class OllamaClient:
         }
         if self._config.max_tokens is not None:
             payload["options"]["num_predict"] = self._config.max_tokens
+        base_url = self._config.base_url.rstrip("/")
+        endpoint = base_url if base_url.endswith("/api/chat") else f"{base_url}/api/chat"
         try:
             response = requests.post(
-                f"{self._config.base_url}/api/chat",
+                endpoint,
                 json=payload,
                 timeout=30,
             )
