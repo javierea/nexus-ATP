@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import sys
 from pathlib import Path
 
 import typer
@@ -166,6 +168,29 @@ def ui(
     setup_logging(data_dir() / "logs")
     init_project()
     run_ui(host, port)
+
+
+@app.command("ui-streamlit")
+def ui_streamlit(
+    host: str = typer.Option("127.0.0.1", help="Host para la UI Streamlit."),
+    port: int = typer.Option(8501, help="Puerto para la UI Streamlit."),
+) -> None:
+    """Launch Streamlit control panel."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    app_path = Path(__file__).with_name("streamlit_app.py")
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app_path),
+        "--server.address",
+        host,
+        "--server.port",
+        str(port),
+    ]
+    subprocess.run(cmd, check=False)
 
 
 @app.command("structure")
