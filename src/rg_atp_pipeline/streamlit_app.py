@@ -404,23 +404,28 @@ def render_audit(db_path: Path) -> None:
         save_to_db = st.checkbox("Guardar histórico en SQLite", value=True)
         submitted = st.form_submit_button("Run")
 
-    if not submitted:
-        return
+    if submitted:
+        if uploaded is not None:
+            export_path = Path(export_dir)
+            export_path.mkdir(parents=True, exist_ok=True)
+            temp_path = export_path / uploaded.name
+            temp_path.write_bytes(uploaded.getbuffer())
+            pdf_path = str(temp_path)
 
-    if uploaded is not None:
-        export_path = Path(export_dir)
-        export_path.mkdir(parents=True, exist_ok=True)
-        temp_path = export_path / uploaded.name
-        temp_path.write_bytes(uploaded.getbuffer())
-        pdf_path = str(temp_path)
-
-    refs, summary = run_audit_compendio(
-        Path(pdf_path),
-        db_path,
-        Path(export_dir),
-        min_confidence=min_confidence,
-        save_to_db=save_to_db,
-    )
+        refs, summary = run_audit_compendio(
+            Path(pdf_path),
+            db_path,
+            Path(export_dir),
+            min_confidence=min_confidence,
+            save_to_db=save_to_db,
+        )
+        st.session_state["audit_refs"] = refs
+        st.session_state["audit_summary"] = summary
+    else:
+        refs = st.session_state.get("audit_refs")
+        summary = st.session_state.get("audit_summary")
+        if refs is None or summary is None:
+            return
 
     if summary.needs_ocr_compendio:
         st.error("El PDF no contiene texto extraíble. needs_ocr_compendio=true.")
