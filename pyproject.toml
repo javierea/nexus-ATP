@@ -18,6 +18,10 @@ test = [
   "reportlab>=4.0",
   "responses>=0.25",
 ]
+ui = [
+  "streamlit>=1.30",
+  "pandas>=2.0",
+]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

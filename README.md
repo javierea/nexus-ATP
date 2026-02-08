@@ -34,6 +34,12 @@ pip install -e .
 pip install -e ".[test]"
 ```
 
+## UI Streamlit (opcional)
+```bash
+pip install -e ".[ui]"
+python -m rg_atp_pipeline ui-streamlit
+```
+
 ## Comandos (Etapa 2)
 ```bash
 python -m rg_atp_pipeline --help
@@ -53,6 +59,7 @@ python -m rg_atp_pipeline structure --limit 50
 python -m rg_atp_pipeline structure --doc-key RG-2024-001 --force
 python -m rg_atp_pipeline structure --include-needs-ocr --no-export-json
 python -m rg_atp_pipeline ui --host 127.0.0.1 --port 8000
+python -m rg_atp_pipeline ui-streamlit --host 127.0.0.1 --port 8501
 ```
 
 ## Notas
@@ -63,3 +70,4 @@ python -m rg_atp_pipeline ui --host 127.0.0.1 --port 8000
 - `extract` genera texto crudo por página en `data/text/`, calcula métricas y marca `NEEDS_OCR` cuando corresponde.
 - `structure` segmenta el texto crudo en unidades normativas (ARTÍCULO/ANEXO/secciones) y guarda unidades en SQLite, con export JSON opcional en `data/structured/`.
 - `ui` levanta una interfaz mínima para revisar inventario, ver config/estado y ejecutar fetches manuales o programados.
+- `ui-streamlit` levanta un panel Streamlit con dashboard, acciones de pipeline y módulos de configuración.
