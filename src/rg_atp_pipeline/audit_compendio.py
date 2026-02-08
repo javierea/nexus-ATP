@@ -257,44 +257,97 @@ def _compare_to_sqlite(
 
     present_downloaded: list[str] = []
     present_not_downloaded: list[MissingDownload] = []
-    found: dict[str, tuple[str, str | None, str, str | None]] = {}
 
     with sqlite3.connect(db_path) as conn:
-        for chunk in _chunks(doc_keys, 900):
-            placeholders = ",".join("?" for _ in chunk)
-            query = (
-                "SELECT doc_key, status, latest_pdf_path, url, last_checked_at, last_downloaded_at "
-                f"FROM documents WHERE doc_key IN ({placeholders})"
-            )
-            rows = conn.execute(query, list(chunk)).fetchall()
-            for doc_key, status, latest_pdf_path, url, last_checked_at, last_downloaded_at in rows:
-                found[doc_key] = (
-                    status,
-                    latest_pdf_path,
-                    url,
-                    last_checked_at,
-                    last_downloaded_at,
-                )
+        not_registered: list[str] = []
+        for key in doc_keys:
+            parsed = _parse_doc_key_normalized(key)
+            rows: list[tuple[str, str, str | None, str, str | None, str | None]] = []
+            if parsed is None:
+                rows = conn.execute(
+                    "SELECT doc_key, status, latest_pdf_path, url, last_checked_at, last_downloaded_at "
+                    "FROM documents WHERE doc_key = ?",
+                    (key,),
+                ).fetchall()
+            else:
+                doc_family, year, number = parsed
+                if doc_family == "NEW" and year is not None:
+                    rows = conn.execute(
+                        "SELECT doc_key, status, latest_pdf_path, url, last_checked_at, last_downloaded_at "
+                        "FROM documents WHERE doc_family = ? AND year = ? AND number = ?",
+                        (doc_family, year, number),
+                    ).fetchall()
+                elif doc_family == "OLD":
+                    rows = conn.execute(
+                        "SELECT doc_key, status, latest_pdf_path, url, last_checked_at, last_downloaded_at "
+                        "FROM documents WHERE doc_family = ? AND number = ?",
+                        (doc_family, number),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT doc_key, status, latest_pdf_path, url, last_checked_at, last_downloaded_at "
+                        "FROM documents WHERE doc_key = ?",
+                        (key,),
+                    ).fetchall()
 
-    not_registered: list[str] = []
-    for key in doc_keys:
-        if key not in found:
-            not_registered.append(key)
-            continue
-        status, latest_pdf_path, url, last_checked_at, last_downloaded_at = found[key]
-        if status == "DOWNLOADED" and latest_pdf_path:
-            present_downloaded.append(key)
-        else:
+            if not rows:
+                not_registered.append(key)
+                continue
+
+            if any(
+                status == "DOWNLOADED" and latest_pdf_path
+                for _, status, latest_pdf_path, _, _, _ in rows
+            ):
+                present_downloaded.append(key)
+                continue
+
+            representative = _pick_missing_download_representative(rows)
             present_not_downloaded.append(
                 MissingDownload(
                     doc_key=key,
-                    status=status,
-                    last_checked_at=last_checked_at,
-                    last_downloaded_at=last_downloaded_at,
-                    url=url,
+                    status=representative[1],
+                    last_checked_at=representative[4],
+                    last_downloaded_at=representative[5],
+                    url=representative[3],
                 )
             )
+
     return present_downloaded, present_not_downloaded, not_registered
+
+
+def _parse_doc_key_normalized(doc_key: str) -> tuple[str, int | None, int] | None:
+    normalized = doc_key.strip().upper()
+    new_match = re.match(
+        r"^(RES|NEW)[-\s]*(\d{4})[-\s]*(\d{1,6})(?:[-\s]*20[-\s]*1)?$",
+        normalized,
+    )
+    if new_match:
+        return "NEW", int(new_match.group(2)), int(new_match.group(3))
+    old_match = re.match(r"^OLD[-\s]*(\d{1,6})$", normalized)
+    if old_match:
+        return "OLD", None, int(old_match.group(1))
+    return None
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _pick_missing_download_representative(
+    rows: Sequence[tuple[str, str, str | None, str, str | None, str | None]],
+) -> tuple[str, str, str | None, str, str | None, str | None]:
+    def sort_key(
+        row: tuple[str, str, str | None, str, str | None, str | None]
+    ) -> tuple[datetime, str]:
+        last_checked_at = _parse_iso_datetime(row[4]) or datetime.min
+        return last_checked_at, row[0]
+
+    return max(rows, key=sort_key)
 
 
 def _save_refs_to_db(
