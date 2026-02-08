@@ -27,6 +27,7 @@ from rg_atp_pipeline.state import load_state
 from rg_atp_pipeline.storage_sqlite import DocumentStore
 from rg_atp_pipeline.structure_segmenter import StructureOptions, run_structure
 from rg_atp_pipeline.text_extractor import ExtractOptions, run_extract
+from rg_atp_pipeline.audit_compendio import run_audit_compendio
 
 
 st.set_page_config(page_title="RG ATP Control Panel", layout="wide")
@@ -115,7 +116,7 @@ def run_app() -> None:
 
     page = st.sidebar.radio(
         "Módulo",
-        ["Dashboard", "Fetch", "Extract", "Structure", "Config", "Logs"],
+        ["Dashboard", "Fetch", "Extract", "Structure", "Audit", "Config", "Logs"],
     )
 
     if page == "Dashboard":
@@ -126,6 +127,8 @@ def run_app() -> None:
         render_extract(db_path, store, logger)
     elif page == "Structure":
         render_structure(db_path, store, logger)
+    elif page == "Audit":
+        render_audit(db_path)
     elif page == "Config":
         render_config()
     elif page == "Logs":
@@ -364,6 +367,68 @@ def render_structure(db_path: Path, store: DocumentStore, logger: logging.Logger
                 st.code(json_path.read_text(encoding="utf-8"), language="json")
         else:
             st.info("No se encontró el JSON para este doc_key.")
+
+
+def render_audit(db_path: Path) -> None:
+    st.title("Audit")
+    default_pdf = data_dir() / "compendio-legislativo-al-31-12-2024.pdf"
+
+    with st.form("audit_form"):
+        pdf_path = st.text_input("Ruta al PDF", value=str(default_pdf))
+        uploaded = st.file_uploader("O cargar PDF", type=["pdf"])
+        export_dir = st.text_input("Directorio export", value=str(data_dir() / "audit"))
+        min_confidence = st.slider("Confianza mínima", 0.0, 1.0, 0.0, 0.05)
+        save_to_db = st.checkbox("Guardar histórico en SQLite", value=True)
+        submitted = st.form_submit_button("Run")
+
+    if not submitted:
+        return
+
+    if uploaded is not None:
+        export_path = Path(export_dir)
+        export_path.mkdir(parents=True, exist_ok=True)
+        temp_path = export_path / uploaded.name
+        temp_path.write_bytes(uploaded.getbuffer())
+        pdf_path = str(temp_path)
+
+    refs, summary = run_audit_compendio(
+        Path(pdf_path),
+        db_path,
+        Path(export_dir),
+        min_confidence=min_confidence,
+        save_to_db=save_to_db,
+    )
+
+    if summary.needs_ocr_compendio:
+        st.error("El PDF no contiene texto extraíble. needs_ocr_compendio=true.")
+        st.stop()
+
+    st.subheader("KPIs")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Refs detectadas", summary.total_refs_detected)
+    col2.metric("Únicas", summary.unique_refs_detected)
+    col3.metric("Presentes descargadas", len(summary.present_downloaded))
+    col4.metric("No registradas", len(summary.not_registered))
+
+    st.subheader("Faltantes (no registradas)")
+    missing_rows = [{"doc_key": key} for key in summary.not_registered]
+    st.dataframe(maybe_dataframe(missing_rows))
+
+    st.subheader("Referencias detectadas")
+    rows = [
+        {
+            "doc_key_normalized": ref.doc_key_normalized,
+            "year": ref.year,
+            "number": ref.number,
+            "page": ref.page_number,
+            "confidence": ref.confidence,
+            "raw_reference": ref.raw_reference,
+            "evidence": ref.evidence_snippet,
+        }
+        for ref in refs
+    ]
+    st.dataframe(maybe_dataframe(rows))
+    st.caption(f"Exportado en {summary.export_dir} con run_id={summary.run_id}.")
 
 
 
