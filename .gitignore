@@ -6,5 +6,7 @@ data/logs/
 data/state/*.json
 data/state/*.sqlite
 data/raw_pdfs/latest/*.json
+data/**/*.json
+data/**/*.txt
 src/**/*.txt
 *.pyc
