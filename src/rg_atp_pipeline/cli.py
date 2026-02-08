@@ -182,6 +182,11 @@ def audit_compendio(
         "--save-to-db/--no-save-to-db",
         help="Guardar referencias en tabla compendio_refs.",
     ),
+    only_missing_downloads: bool = typer.Option(
+        False,
+        "--only-missing-downloads",
+        help="Exportar solo missing_downloads a CSV.",
+    ),
 ) -> None:
     """Auditar el compendio legislativo para detectar RG faltantes."""
     setup_logging(data_dir() / "logs")
@@ -193,6 +198,8 @@ def audit_compendio(
         Path(export_dir),
         min_confidence=min_confidence,
         save_to_db=save_to_db,
+        export_refs=not only_missing_downloads,
+        export_missing_downloads=True,
     )
 
     if summary.needs_ocr_compendio:

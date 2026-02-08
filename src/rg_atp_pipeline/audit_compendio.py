@@ -6,12 +6,19 @@ import csv
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from pypdf import PdfReader
+
+from .llm_review import (
+    LLMReviewer,
+    MissingDownloadCandidate,
+    MissingDownloadReview,
+    filter_missing_downloads_atp,
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +33,24 @@ class CompendioReference:
 
 
 @dataclass(frozen=True)
+class MissingDownload:
+    doc_key: str
+    status: str
+    last_checked_at: str | None
+    last_downloaded_at: str | None
+    url: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "doc_key": self.doc_key,
+            "status": self.status,
+            "last_checked_at": self.last_checked_at,
+            "last_downloaded_at": self.last_downloaded_at,
+            "url": self.url,
+        }
+
+
+@dataclass(frozen=True)
 class AuditSummary:
     run_id: str
     pdf_path: str
@@ -35,10 +60,13 @@ class AuditSummary:
     total_refs_detected: int
     unique_refs_detected: int
     present_downloaded: list[str]
-    present_not_downloaded: list[str]
+    present_not_downloaded: list[MissingDownload]
     not_registered: list[str]
+    missing_downloads_reviewed_counts: dict[str, int] | None = None
+    missing_downloads_atp: list[str] | None = None
 
     def as_dict(self) -> dict[str, object]:
+        missing_downloads = [item.as_dict() for item in self.present_not_downloaded]
         return {
             "run_id": self.run_id,
             "pdf_path": self.pdf_path,
@@ -48,13 +76,19 @@ class AuditSummary:
             "total_refs_detected": self.total_refs_detected,
             "unique_refs_detected": self.unique_refs_detected,
             "present_downloaded": self.present_downloaded,
-            "present_not_downloaded": self.present_not_downloaded,
+            "present_not_downloaded": missing_downloads,
+            "missing_downloads": missing_downloads,
             "not_registered": self.not_registered,
+            "present_downloaded_count": len(self.present_downloaded),
+            "present_not_downloaded_count": len(self.present_not_downloaded),
+            "not_registered_count": len(self.not_registered),
             "counts": {
                 "present_downloaded": len(self.present_downloaded),
                 "present_not_downloaded": len(self.present_not_downloaded),
                 "not_registered": len(self.not_registered),
             },
+            "missing_downloads_reviewed_counts": self.missing_downloads_reviewed_counts,
+            "missing_downloads_atp": self.missing_downloads_atp,
         }
 
 
@@ -143,6 +177,8 @@ def run_audit_compendio(
     export_dir: Path,
     min_confidence: float = 0.0,
     save_to_db: bool = True,
+    export_refs: bool = True,
+    export_missing_downloads: bool = True,
 ) -> tuple[list[CompendioReference], AuditSummary]:
     pages = extract_compendio_pages(pdf_path)
     if not any(page.strip() for page in pages):
@@ -172,10 +208,15 @@ def run_audit_compendio(
 
     export_dir.mkdir(parents=True, exist_ok=True)
     run_id = _timestamp()
-    refs_csv = export_dir / f"refs_detected_{run_id}.csv"
     summary_json = export_dir / f"audit_summary_{run_id}.json"
 
-    _write_refs_csv(refs_csv, filtered)
+    if export_refs:
+        refs_csv = export_dir / f"refs_detected_{run_id}.csv"
+        _write_refs_csv(refs_csv, filtered)
+    if export_missing_downloads:
+        _write_missing_downloads_csv(
+            export_dir / f"missing_downloads_{run_id}.csv", present_not_downloaded
+        )
     summary = AuditSummary(
         run_id=run_id,
         pdf_path=str(pdf_path),
@@ -210,30 +251,49 @@ def _unique_keys(references: Iterable[CompendioReference]) -> list[str]:
 def _compare_to_sqlite(
     doc_keys: list[str],
     db_path: Path,
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[str], list[MissingDownload], list[str]]:
     if not doc_keys:
         return [], [], []
 
     present_downloaded: list[str] = []
-    present_not_downloaded: list[str] = []
-    found: set[str] = set()
+    present_not_downloaded: list[MissingDownload] = []
+    found: dict[str, tuple[str, str | None, str, str | None]] = {}
 
     with sqlite3.connect(db_path) as conn:
         for chunk in _chunks(doc_keys, 900):
             placeholders = ",".join("?" for _ in chunk)
             query = (
-                "SELECT doc_key, status, latest_pdf_path "
+                "SELECT doc_key, status, latest_pdf_path, url, last_checked_at, last_downloaded_at "
                 f"FROM documents WHERE doc_key IN ({placeholders})"
             )
             rows = conn.execute(query, list(chunk)).fetchall()
-            for doc_key, status, latest_pdf_path in rows:
-                found.add(doc_key)
-                if status == "DOWNLOADED" and latest_pdf_path:
-                    present_downloaded.append(doc_key)
-                else:
-                    present_not_downloaded.append(doc_key)
+            for doc_key, status, latest_pdf_path, url, last_checked_at, last_downloaded_at in rows:
+                found[doc_key] = (
+                    status,
+                    latest_pdf_path,
+                    url,
+                    last_checked_at,
+                    last_downloaded_at,
+                )
 
-    not_registered = [key for key in doc_keys if key not in found]
+    not_registered: list[str] = []
+    for key in doc_keys:
+        if key not in found:
+            not_registered.append(key)
+            continue
+        status, latest_pdf_path, url, last_checked_at, last_downloaded_at = found[key]
+        if status == "DOWNLOADED" and latest_pdf_path:
+            present_downloaded.append(key)
+        else:
+            present_not_downloaded.append(
+                MissingDownload(
+                    doc_key=key,
+                    status=status,
+                    last_checked_at=last_checked_at,
+                    last_downloaded_at=last_downloaded_at,
+                    url=url,
+                )
+            )
     return present_downloaded, present_not_downloaded, not_registered
 
 
@@ -291,6 +351,186 @@ def _save_refs_to_db(
                     ref.evidence_snippet,
                 )
                 for ref in references
+            ],
+        )
+        conn.commit()
+
+
+def review_missing_downloads(
+    missing_downloads: Sequence[MissingDownload],
+    references: Sequence[CompendioReference],
+    reviewer: LLMReviewer,
+    export_dir: Path,
+    run_id: str,
+    model_name: str,
+    confidence_threshold: float = 0.8,
+    db_path: Path | None = None,
+    save_to_db: bool = True,
+) -> tuple[list[MissingDownloadReview], list[MissingDownloadReview]]:
+    if not missing_downloads:
+        reviewed: list[MissingDownloadReview] = []
+        atp_only: list[MissingDownloadReview] = []
+    else:
+        candidates = _build_review_candidates(missing_downloads, references)
+        reviewed = reviewer.review(candidates)
+        atp_only = filter_missing_downloads_atp(reviewed, confidence_threshold)
+
+    export_dir.mkdir(parents=True, exist_ok=True)
+    reviewed_path = export_dir / "missing_downloads_reviewed.csv"
+    atp_path = export_dir / "missing_downloads_atp.csv"
+    _write_reviewed_csv(reviewed_path, reviewed)
+    _write_reviewed_csv(atp_path, atp_only)
+
+    if reviewed and save_to_db and db_path is not None:
+        _save_missing_reviews_to_db(db_path, run_id, model_name, reviewed)
+
+    return reviewed, atp_only
+
+
+def update_audit_summary_with_review(
+    summary: AuditSummary,
+    reviewed: Sequence[MissingDownloadReview],
+    atp_only: Sequence[MissingDownloadReview],
+) -> AuditSummary:
+    counts: dict[str, int] = {}
+    for item in reviewed:
+        counts[item.verdict] = counts.get(item.verdict, 0) + 1
+    updated = replace(
+        summary,
+        missing_downloads_reviewed_counts=counts,
+        missing_downloads_atp=[item.doc_key for item in atp_only],
+    )
+    summary_path = Path(summary.export_dir) / f"audit_summary_{summary.run_id}.json"
+    summary_path.write_text(json.dumps(updated.as_dict(), indent=2, ensure_ascii=False))
+    return updated
+
+
+def _build_review_candidates(
+    missing_downloads: Sequence[MissingDownload],
+    references: Sequence[CompendioReference],
+) -> list[MissingDownloadCandidate]:
+    by_doc: dict[str, CompendioReference] = {}
+    for ref in references:
+        existing = by_doc.get(ref.doc_key_normalized)
+        if existing is None or ref.confidence > existing.confidence:
+            by_doc[ref.doc_key_normalized] = ref
+
+    candidates: list[MissingDownloadCandidate] = []
+    for item in missing_downloads:
+        ref = by_doc.get(item.doc_key)
+        candidates.append(
+            MissingDownloadCandidate(
+                doc_key=item.doc_key,
+                raw_reference=ref.raw_reference if ref else "",
+                evidence_snippet=ref.evidence_snippet if ref else "",
+                page_number=ref.page_number if ref else None,
+                status=item.status,
+                url=item.url,
+                last_checked_at=item.last_checked_at,
+                last_downloaded_at=item.last_downloaded_at,
+            )
+        )
+    return candidates
+
+
+def _write_missing_downloads_csv(path: Path, missing: Sequence[MissingDownload]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            ["doc_key", "status", "last_checked_at", "last_downloaded_at", "url"]
+        )
+        for item in missing:
+            writer.writerow(
+                [
+                    item.doc_key,
+                    item.status,
+                    item.last_checked_at,
+                    item.last_downloaded_at,
+                    item.url,
+                ]
+            )
+
+
+def _write_reviewed_csv(path: Path, reviews: Sequence[MissingDownloadReview]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "doc_key",
+                "verdict",
+                "org_guess",
+                "confidence",
+                "reason",
+                "status",
+                "url",
+                "last_checked_at",
+                "last_downloaded_at",
+            ]
+        )
+        for review in reviews:
+            writer.writerow(
+                [
+                    review.doc_key,
+                    review.verdict,
+                    review.org_guess,
+                    f"{review.confidence:.2f}",
+                    review.reason,
+                    review.status,
+                    review.url,
+                    review.last_checked_at,
+                    review.last_downloaded_at,
+                ]
+            )
+
+
+def _save_missing_reviews_to_db(
+    db_path: Path,
+    run_id: str,
+    model_name: str,
+    reviews: Sequence[MissingDownloadReview],
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS compendio_missing_review (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                doc_key TEXT NOT NULL,
+                model TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                org_guess TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                reason TEXT NOT NULL
+            )
+            """
+        )
+        created_at = datetime.now(timezone.utc).isoformat()
+        conn.executemany(
+            """
+            INSERT INTO compendio_missing_review (
+                run_id,
+                created_at,
+                doc_key,
+                model,
+                verdict,
+                org_guess,
+                confidence,
+                reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    run_id,
+                    created_at,
+                    review.doc_key,
+                    model_name,
+                    review.verdict,
+                    review.org_guess,
+                    review.confidence,
+                    review.reason,
+                )
+                for review in reviews
             ],
         )
         conn.commit()

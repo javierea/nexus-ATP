@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 from pathlib import Path
@@ -27,7 +29,17 @@ from rg_atp_pipeline.state import load_state
 from rg_atp_pipeline.storage_sqlite import DocumentStore
 from rg_atp_pipeline.structure_segmenter import StructureOptions, run_structure
 from rg_atp_pipeline.text_extractor import ExtractOptions, run_extract
-from rg_atp_pipeline.audit_compendio import run_audit_compendio
+from rg_atp_pipeline.audit_compendio import (
+    review_missing_downloads,
+    run_audit_compendio,
+    update_audit_summary_with_review,
+)
+from rg_atp_pipeline.ollama_client import (
+    OllamaClient,
+    OllamaConfig,
+    OllamaReviewer,
+    OllamaUnavailableError,
+)
 
 
 st.set_page_config(page_title="RG ATP Control Panel", layout="wide")
@@ -75,6 +87,17 @@ def maybe_dataframe(records: list[dict[str, Any]]) -> Any:
         return pd.DataFrame(records)
     except ImportError:
         return records
+
+
+def rows_to_csv(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return output.getvalue()
 
 
 def parse_optional_int(value: str) -> int | None:
@@ -404,30 +427,143 @@ def render_audit(db_path: Path) -> None:
         st.stop()
 
     st.subheader("KPIs")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Refs detectadas", summary.total_refs_detected)
-    col2.metric("Únicas", summary.unique_refs_detected)
-    col3.metric("Presentes descargadas", len(summary.present_downloaded))
-    col4.metric("No registradas", len(summary.not_registered))
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Presentes descargadas", len(summary.present_downloaded))
+    col2.metric(
+        "Faltan descargar pero aparecen en el compendio",
+        len(summary.present_not_downloaded),
+    )
+    col3.metric(
+        "No registradas (puede ser otro organismo)", len(summary.not_registered)
+    )
+    coverage_total = len(summary.present_downloaded) + len(summary.present_not_downloaded)
+    coverage_pct = (
+        (len(summary.present_downloaded) / coverage_total * 100)
+        if coverage_total
+        else 0.0
+    )
+    st.caption(
+        f"Cobertura compendio: {len(summary.present_downloaded)} / {coverage_total} "
+        f"({coverage_pct:.1f}%)."
+    )
 
-    st.subheader("Faltantes (no registradas)")
-    missing_rows = [{"doc_key": key} for key in summary.not_registered]
+    st.subheader("Faltan descargar pero aparecen en el compendio")
+    missing_rows = [
+        {
+            "doc_key": item.doc_key,
+            "status": item.status,
+            "last_checked_at": item.last_checked_at,
+            "last_downloaded_at": item.last_downloaded_at,
+            "url": item.url,
+        }
+        for item in summary.present_not_downloaded
+    ]
     st.dataframe(maybe_dataframe(missing_rows))
 
-    st.subheader("Referencias detectadas")
-    rows = [
+    st.subheader("No registradas (refs)")
+    not_registered_set = set(summary.not_registered)
+    not_registered_rows = [
         {
-            "doc_key_normalized": ref.doc_key_normalized,
-            "year": ref.year,
-            "number": ref.number,
-            "page": ref.page_number,
+            "page_number": ref.page_number,
             "confidence": ref.confidence,
             "raw_reference": ref.raw_reference,
-            "evidence": ref.evidence_snippet,
+            "evidence_snippet": ref.evidence_snippet,
         }
         for ref in refs
+        if ref.doc_key_normalized in not_registered_set
     ]
-    st.dataframe(maybe_dataframe(rows))
+    st.dataframe(maybe_dataframe(not_registered_rows))
+
+    if st.session_state.get("audit_run_id") != summary.run_id:
+        st.session_state["audit_run_id"] = summary.run_id
+        st.session_state["missing_downloads_reviewed"] = []
+        st.session_state["missing_downloads_atp"] = []
+
+    st.subheader("Depurar missing_downloads con Ollama")
+    enable_review = st.toggle("Activar LLM (Ollama local)", value=False)
+    if enable_review:
+        model = st.selectbox(
+            "Modelo",
+            [
+                "llama3.1:70b-instruct-q4_K_M",
+                "llava:13b",
+                "qwen2.5:14b-instruct-q5_K_M",
+                "qwen2.5:7b-instruct",
+            ],
+        )
+        temperature = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
+        max_tokens = st.number_input(
+            "Max tokens (num_predict)", min_value=0, value=256, step=32
+        )
+        confidence_threshold = st.slider(
+            "Confidence threshold (ATP_MISSING)", 0.0, 1.0, 0.8, 0.05
+        )
+        run_review = st.button("Run Review")
+
+        if run_review:
+            config = OllamaConfig(
+                model=model,
+                temperature=float(temperature),
+                max_tokens=int(max_tokens) if max_tokens else None,
+            )
+            reviewer = OllamaReviewer(OllamaClient(config))
+            try:
+                reviewed, atp_only = review_missing_downloads(
+                    summary.present_not_downloaded,
+                    refs,
+                    reviewer,
+                    Path(summary.export_dir),
+                    summary.run_id,
+                    model_name=model,
+                    confidence_threshold=confidence_threshold,
+                    db_path=db_path,
+                    save_to_db=save_to_db,
+                )
+            except OllamaUnavailableError as exc:
+                st.error(str(exc))
+                reviewed = []
+                atp_only = []
+            else:
+                summary = update_audit_summary_with_review(summary, reviewed, atp_only)
+                st.success(
+                    "Review completado. Exportados missing_downloads_reviewed.csv y "
+                    "missing_downloads_atp.csv."
+                )
+
+            st.session_state["missing_downloads_reviewed"] = reviewed
+            st.session_state["missing_downloads_atp"] = atp_only
+
+        reviewed_cached = st.session_state.get("missing_downloads_reviewed", [])
+        atp_cached = st.session_state.get("missing_downloads_atp", [])
+        tabs = st.tabs(["ATP_MISSING", "OTHER_ORG", "DETECTION_ERROR", "UNKNOWN"])
+        verdict_map = {
+            "ATP_MISSING": tabs[0],
+            "OTHER_ORG": tabs[1],
+            "DETECTION_ERROR": tabs[2],
+            "UNKNOWN": tabs[3],
+        }
+        for verdict, tab in verdict_map.items():
+            with tab:
+                rows = [
+                    review.as_dict()
+                    for review in reviewed_cached
+                    if review.verdict == verdict
+                ]
+                st.dataframe(maybe_dataframe(rows))
+                if rows:
+                    st.download_button(
+                        f"Export {verdict}",
+                        data=rows_to_csv(rows),
+                        file_name=f"missing_downloads_{verdict.lower()}.csv",
+                    )
+        if atp_cached:
+            atp_rows = [review.as_dict() for review in atp_cached]
+            st.download_button(
+                "Export solo ATP_MISSING",
+                data=rows_to_csv(atp_rows),
+                file_name="missing_downloads_atp.csv",
+            )
+
     st.caption(f"Exportado en {summary.export_dir} con run_id={summary.run_id}.")
 
 
