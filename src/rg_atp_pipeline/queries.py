@@ -13,7 +13,17 @@ def get_kpis(db_path: Path) -> dict[str, int]:
         row = conn.execute(
             """
             SELECT
-                COUNT(*) AS total_docs,
+                COUNT(
+                    DISTINCT CASE
+                        WHEN d.doc_family = 'OLD' THEN printf('OLD-%s', d.number)
+                        ELSE printf(
+                            '%s-%s-%s',
+                            d.doc_family,
+                            COALESCE(d.year, ''),
+                            d.number
+                        )
+                    END
+                ) AS total_docs,
                 SUM(CASE WHEN d.status = 'DOWNLOADED' THEN 1 ELSE 0 END) AS downloaded,
                 SUM(CASE WHEN d.status = 'MISSING' THEN 1 ELSE 0 END) AS missing,
                 SUM(CASE WHEN d.status = 'ERROR' THEN 1 ELSE 0 END) AS fetch_error,
