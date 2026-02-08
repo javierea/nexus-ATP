@@ -404,23 +404,28 @@ def render_audit(db_path: Path) -> None:
         save_to_db = st.checkbox("Guardar histórico en SQLite", value=True)
         submitted = st.form_submit_button("Run")
 
-    if not submitted:
-        return
+    if submitted:
+        if uploaded is not None:
+            export_path = Path(export_dir)
+            export_path.mkdir(parents=True, exist_ok=True)
+            temp_path = export_path / uploaded.name
+            temp_path.write_bytes(uploaded.getbuffer())
+            pdf_path = str(temp_path)
 
-    if uploaded is not None:
-        export_path = Path(export_dir)
-        export_path.mkdir(parents=True, exist_ok=True)
-        temp_path = export_path / uploaded.name
-        temp_path.write_bytes(uploaded.getbuffer())
-        pdf_path = str(temp_path)
-
-    refs, summary = run_audit_compendio(
-        Path(pdf_path),
-        db_path,
-        Path(export_dir),
-        min_confidence=min_confidence,
-        save_to_db=save_to_db,
-    )
+        refs, summary = run_audit_compendio(
+            Path(pdf_path),
+            db_path,
+            Path(export_dir),
+            min_confidence=min_confidence,
+            save_to_db=save_to_db,
+        )
+        st.session_state["audit_refs"] = refs
+        st.session_state["audit_summary"] = summary
+    else:
+        refs = st.session_state.get("audit_refs")
+        summary = st.session_state.get("audit_summary")
+        if refs is None or summary is None:
+            return
 
     if summary.needs_ocr_compendio:
         st.error("El PDF no contiene texto extraíble. needs_ocr_compendio=true.")
@@ -482,6 +487,11 @@ def render_audit(db_path: Path) -> None:
     st.subheader("Depurar missing_downloads con Ollama")
     enable_review = st.toggle("Activar LLM (Ollama local)", value=False)
     if enable_review:
+        base_url = st.text_input(
+            "Base URL Ollama",
+            value="http://localhost:11434",
+            help="Ej: http://localhost:11434 o http://localhost:11434/api/chat",
+        )
         model = st.selectbox(
             "Modelo",
             [
@@ -505,6 +515,7 @@ def render_audit(db_path: Path) -> None:
                 model=model,
                 temperature=float(temperature),
                 max_tokens=int(max_tokens) if max_tokens else None,
+                base_url=base_url,
             )
             reviewer = OllamaReviewer(OllamaClient(config))
             try:
