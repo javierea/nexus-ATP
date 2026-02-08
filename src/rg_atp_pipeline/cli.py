@@ -12,6 +12,7 @@ import typer
 from pydantic import ValidationError
 
 from .config import Config, load_config
+from .audit_compendio import run_audit_compendio
 from .fetcher import FetchOptions, run_fetch
 from .logging_utils import setup_logging
 from .paths import config_path, data_dir, state_path
@@ -157,6 +158,67 @@ def extract(
         logging.getLogger("rg_atp_pipeline"),
     )
     typer.echo(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
+
+
+@app.command("audit-compendio")
+def audit_compendio(
+    pdf_path: str = typer.Option(
+        str(data_dir() / "compendio-legislativo-al-31-12-2024.pdf"),
+        "--pdf-path",
+        help="Ruta al PDF del compendio legislativo.",
+    ),
+    export_dir: str = typer.Option(
+        str(data_dir() / "audit"),
+        "--export-dir",
+        help="Directorio de exportación (CSV/JSON).",
+    ),
+    min_confidence: float = typer.Option(
+        0.0,
+        "--min-confidence",
+        help="Confianza mínima para incluir referencias.",
+    ),
+    save_to_db: bool = typer.Option(
+        True,
+        "--save-to-db/--no-save-to-db",
+        help="Guardar referencias en tabla compendio_refs.",
+    ),
+) -> None:
+    """Auditar el compendio legislativo para detectar RG faltantes."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    db_path = data_dir() / "state" / "rg_atp.sqlite"
+    refs, summary = run_audit_compendio(
+        Path(pdf_path),
+        db_path,
+        Path(export_dir),
+        min_confidence=min_confidence,
+        save_to_db=save_to_db,
+    )
+
+    if summary.needs_ocr_compendio:
+        typer.secho(
+            "El PDF no contiene texto extraíble. "
+            "needs_ocr_compendio=true. Abortando auditoría.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"Detectadas {summary.total_refs_detected} refs "
+        f"({summary.unique_refs_detected} únicas)."
+    )
+    typer.echo(
+        f"Presentes descargadas: {len(summary.present_downloaded)} | "
+        f"Presentes no descargadas: {len(summary.present_not_downloaded)} | "
+        f"No registradas: {len(summary.not_registered)}"
+    )
+    typer.echo(
+        json.dumps(
+            summary.as_dict(),
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
 
 
 @app.command("ui")
