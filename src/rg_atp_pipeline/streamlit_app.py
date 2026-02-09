@@ -40,6 +40,11 @@ from rg_atp_pipeline.ollama_client import (
     OllamaReviewer,
     OllamaUnavailableError,
 )
+from rg_atp_pipeline.norms_ui import (
+    resolve_norm_ui,
+    seed_catalog,
+    upload_norm_pdf_ui,
+)
 
 
 st.set_page_config(page_title="RG ATP Control Panel", layout="wide")
@@ -139,7 +144,16 @@ def run_app() -> None:
 
     page = st.sidebar.radio(
         "Módulo",
-        ["Dashboard", "Fetch", "Extract", "Structure", "Audit", "Config", "Logs"],
+        [
+            "Dashboard",
+            "Fetch",
+            "Extract",
+            "Structure",
+            "Audit",
+            "Normas",
+            "Config",
+            "Logs",
+        ],
     )
 
     if page == "Dashboard":
@@ -152,6 +166,8 @@ def run_app() -> None:
         render_structure(db_path, store, logger)
     elif page == "Audit":
         render_audit(db_path)
+    elif page == "Normas":
+        render_normas(db_path)
     elif page == "Config":
         render_config()
     elif page == "Logs":
@@ -576,6 +592,80 @@ def render_audit(db_path: Path) -> None:
             )
 
     st.caption(f"Exportado en {summary.export_dir} con run_id={summary.run_id}.")
+
+
+def render_normas(db_path: Path) -> None:
+    st.title("Normas (Leyes/Decretos/CA)")
+    seed_tab, upload_tab, resolve_tab = st.tabs(
+        ["Seed catálogo", "Upload PDF", "Resolver"]
+    )
+
+    with seed_tab:
+        st.subheader("Seed catálogo")
+        default_seed_path = data_dir() / "state" / "seeds" / "norms.yml"
+        seed_path_value = st.text_input(
+            "Ruta seeds YAML", value=str(default_seed_path)
+        )
+        if st.button("Cargar seeds"):
+            try:
+                summary = seed_catalog(
+                    seed_path=Path(seed_path_value), db_path=db_path
+                )
+                st.success("Seeds cargados.")
+                st.json(summary)
+            except (FileNotFoundError, ValueError) as exc:
+                st.error(str(exc))
+
+    with upload_tab:
+        st.subheader("Upload PDF")
+        with st.form("norm_upload_form"):
+            norm_key = st.text_input("Norm key")
+            norm_type = st.text_input("Norm type (opcional)")
+            source_kind = st.selectbox(
+                "Source kind",
+                [
+                    "CONSOLIDATED_CURRENT",
+                    "CONSOLIDATED_HISTORIC",
+                    "OFFICIAL_GAZETTE",
+                    "OTHER",
+                ],
+            )
+            authoritative = st.checkbox("Authoritative", value=False)
+            notes = st.text_area("Notas", value="")
+            file = st.file_uploader("PDF", type=["pdf"])
+            submit = st.form_submit_button("Subir")
+
+        if submit:
+            if not norm_key:
+                st.error("Debe ingresar norm_key.")
+            elif not file:
+                st.error("Debe cargar un PDF.")
+            else:
+                payload = upload_norm_pdf_ui(
+                    db_path=db_path,
+                    base_dir=data_dir(),
+                    norm_key=norm_key,
+                    file_bytes=file.getvalue(),
+                    original_filename=file.name,
+                    source_kind=source_kind,
+                    authoritative=authoritative,
+                    notes=notes or None,
+                    norm_type=norm_type or None,
+                )
+                st.success("Upload completado.")
+                st.json(payload)
+
+    with resolve_tab:
+        st.subheader("Resolver texto libre")
+        query = st.text_input("Texto a resolver")
+        if st.button("Resolver"):
+            if not query.strip():
+                st.error("Debe ingresar un texto.")
+            else:
+                result = resolve_norm_ui(db_path=db_path, text=query)
+                if not result.get("match"):
+                    st.warning("No resuelto.")
+                st.json(result)
 
 
 
