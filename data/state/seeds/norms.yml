@@ -1,0 +1,31 @@
+- norm_key: LEY-83-F
+  norm_type: LEY
+  jurisdiction: CHACO
+  title: "Código Tributario Provincial"
+  aliases:
+    - alias_text: "Ley 83-F"
+      alias_kind: NUMBERED
+      confidence: 1.0
+    - alias_text: "Dec. Ley 2444/62"
+      alias_kind: LEGACY
+      confidence: 1.0
+    - alias_text: "Decreto Ley 2444/62"
+      alias_kind: LEGACY
+      confidence: 1.0
+    - alias_text: "CTP"
+      alias_kind: ACRONYM
+      confidence: 1.0
+    - alias_text: "Código Tributario Provincial"
+      alias_kind: NAME
+      confidence: 1.0
+- norm_key: LEY-TARIFARIA-CHACO
+  norm_type: LEY
+  jurisdiction: CHACO
+  title: "Ley Tarifaria"
+  aliases:
+    - alias_text: "Ley Tarifaria"
+      alias_kind: NAME
+      confidence: 1.0
+    - alias_text: "Tarifaria"
+      alias_kind: OTHER
+      confidence: 0.8

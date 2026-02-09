@@ -60,6 +60,9 @@ python -m rg_atp_pipeline structure --doc-key RG-2024-001 --force
 python -m rg_atp_pipeline structure --include-needs-ocr --no-export-json
 python -m rg_atp_pipeline audit-compendio --pdf-path data/compendio-legislativo-al-31-12-2024.pdf
 python -m rg_atp_pipeline audit-compendio --only-missing-downloads
+python -m rg_atp_pipeline seed-norms
+python -m rg_atp_pipeline upload-norm --norm-key LEY-83-F --file path.pdf --authoritative
+python -m rg_atp_pipeline resolve-norm --text "Dec. Ley 2444/62"
 python -m rg_atp_pipeline ui --host 127.0.0.1 --port 8000
 python -m rg_atp_pipeline ui-streamlit --host 127.0.0.1 --port 8501
 ```
@@ -72,6 +75,9 @@ python -m rg_atp_pipeline ui-streamlit --host 127.0.0.1 --port 8501
 - `extract` genera texto crudo por página en `data/text/`, calcula métricas y marca `NEEDS_OCR` cuando corresponde.
 - `structure` segmenta el texto crudo en unidades normativas (ARTÍCULO/ANEXO/secciones) y guarda unidades en SQLite, con export JSON opcional en `data/structured/`.
 - `audit-compendio` extrae referencias a RG desde el compendio legislativo, normaliza claves (`RES-AAAA-NN-20-1` u `OLD-N`) y exporta CSV/JSON en `data/audit/` con comparación contra `data/state/rg_atp.sqlite`. También genera `missing_downloads_*.csv` y soporta `--only-missing-downloads` para exportar únicamente ese listado.
+- `seed-norms` carga el catálogo inicial de normas y aliases desde `data/state/seeds/norms.yml`.
+- `upload-norm` permite subir manualmente un PDF asociado a una norma, versionándolo por SHA256 en `data/raw_pdfs/` y registrando la fuente.
+- `resolve-norm` resuelve un texto libre contra aliases conocidos y sugiere crear placeholder si no encuentra match.
 - La página Audit de Streamlit incluye una sección opcional para depurar `missing_downloads` con Ollama local y exportar resultados por veredicto.
 - `ui` levanta una interfaz mínima para revisar inventario, ver config/estado y ejecutar fetches manuales o programados.
 - `ui-streamlit` levanta un panel Streamlit con dashboard, acciones de pipeline, módulos de configuración y la página Audit para correr la auditoría del compendio.
