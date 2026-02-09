@@ -1,4 +1,4 @@
-# rg_atp_pipeline (Etapa 3)
+# rg_atp_pipeline (Etapa 4)
 
 Proyecto base para la descarga y procesamiento de PDFs ATP. En esta etapa se incorpora la extracción de texto crudo, métricas de calidad y marcado para OCR.
 
@@ -63,6 +63,8 @@ python -m rg_atp_pipeline audit-compendio --only-missing-downloads
 python -m rg_atp_pipeline seed-norms
 python -m rg_atp_pipeline upload-norm --norm-key LEY-83-F --file path.pdf --authoritative
 python -m rg_atp_pipeline resolve-norm --text "Dec. Ley 2444/62"
+python -m rg_atp_pipeline citations --llm off
+python -m rg_atp_pipeline citations --llm verify --ollama-model qwen2.5:7b-instruct
 python -m rg_atp_pipeline ui --host 127.0.0.1 --port 8000
 python -m rg_atp_pipeline ui-streamlit --host 127.0.0.1 --port 8501
 ```
@@ -78,6 +80,7 @@ python -m rg_atp_pipeline ui-streamlit --host 127.0.0.1 --port 8501
 - `seed-norms` carga el catálogo inicial de normas y aliases desde `data/state/seeds/norms.yml`.
 - `upload-norm` permite subir manualmente un PDF asociado a una norma, versionándolo por SHA256 en `data/raw_pdfs/` y registrando la fuente.
 - `resolve-norm` resuelve un texto libre contra aliases conocidos y sugiere crear placeholder si no encuentra match.
+- `citations` (Etapa 4) detecta referencias normativas en RGs, verifica opcionalmente con Ollama local y resuelve contra el catálogo `norms` (no clasifica relaciones deroga/modifica).
 - La página Audit de Streamlit incluye una sección opcional para depurar `missing_downloads` con Ollama local y exportar resultados por veredicto.
 - `ui` levanta una interfaz mínima para revisar inventario, ver config/estado y ejecutar fetches manuales o programados.
 - `ui-streamlit` levanta un panel Streamlit con dashboard, acciones de pipeline, módulos de configuración y la página Audit para correr la auditoría del compendio.

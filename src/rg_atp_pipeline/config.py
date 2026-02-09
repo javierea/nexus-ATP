@@ -61,6 +61,12 @@ class Config(BaseModel):
     request_timeout_sec: int = Field(..., ge=1)
     retry: RetryPolicy
     text_quality: TextQualityConfig
+    ollama_base_url: str
+    ollama_model: str
+    llm_prompt_version: str
+    llm_gate_regex_threshold: float = Field(..., ge=0, le=1)
+    llm_batch_size: int = Field(..., ge=1)
+    llm_timeout_sec: int = Field(..., ge=1)
 
 
 def default_config() -> Config:
@@ -84,6 +90,12 @@ def default_config() -> Config:
             min_chars_per_page=50,
             min_alpha_ratio=0.5,
         ),
+        ollama_base_url="http://localhost:11434",
+        ollama_model="qwen2.5:7b-instruct",
+        llm_prompt_version="citref-v1",
+        llm_gate_regex_threshold=0.9,
+        llm_batch_size=20,
+        llm_timeout_sec=60,
     )
 
 

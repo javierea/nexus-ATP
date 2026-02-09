@@ -22,3 +22,9 @@ text_quality:
   min_chars_total: 300
   min_chars_per_page: 50
   min_alpha_ratio: 0.5
+ollama_base_url: "http://localhost:11434"
+ollama_model: "qwen2.5:7b-instruct"
+llm_prompt_version: "citref-v1"
+llm_gate_regex_threshold: 0.9
+llm_batch_size: 20
+llm_timeout_sec: 60
