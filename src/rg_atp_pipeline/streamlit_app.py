@@ -34,6 +34,7 @@ from rg_atp_pipeline.audit_compendio import (
     run_audit_compendio,
     update_audit_summary_with_review,
 )
+from rg_atp_pipeline.citations_ui import render_citations_stage
 from rg_atp_pipeline.ollama_client import (
     OllamaClient,
     OllamaConfig,
@@ -150,6 +151,7 @@ def run_app() -> None:
             "Extract",
             "Structure",
             "Audit",
+            "Etapa 4 — Citas",
             "Normas",
             "Config",
             "Logs",
@@ -166,6 +168,8 @@ def run_app() -> None:
         render_structure(db_path, store, logger)
     elif page == "Audit":
         render_audit(db_path)
+    elif page == "Etapa 4 — Citas":
+        render_citations_stage(db_path)
     elif page == "Normas":
         render_normas(db_path)
     elif page == "Config":
