@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 
 import typer
-import yaml
 from pydantic import ValidationError
 
 from .config import Config, load_config
@@ -20,7 +19,7 @@ from .paths import config_path, data_dir, state_path
 from .planner import plan_all
 from .project import init_project
 from .services.manual_upload import upload_norm_pdf
-from .storage.migrations import ensure_schema
+from .services.norm_seed import seed_norms_from_yaml
 from .storage.norms_repo import NormsRepository
 from .storage_sqlite import DocumentStore
 from .state import State, load_state
@@ -307,53 +306,18 @@ def seed_norms() -> None:
     setup_logging(data_dir() / "logs")
     init_project()
     db_path = data_dir() / "state" / "rg_atp.sqlite"
-    ensure_schema(db_path)
     seeds_path = data_dir() / "state" / "seeds" / "norms.yml"
-    if not seeds_path.exists():
+    try:
+        summary = seed_norms_from_yaml(db_path=db_path, seeds_path=seeds_path)
+    except FileNotFoundError:
         typer.secho(
             f"Archivo de seeds no encontrado: {seeds_path}",
             fg=typer.colors.RED,
         )
         raise typer.Exit(code=1)
-    data = yaml.safe_load(seeds_path.read_text()) or []
-    if not isinstance(data, list):
-        typer.secho("El YAML de seeds debe ser una lista.", fg=typer.colors.RED)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(code=1)
-    repo = NormsRepository(db_path)
-    summary = {"norms": 0, "aliases": 0, "sources": 0}
-    for entry in data:
-        norm_id = repo.upsert_norm(
-            norm_key=entry["norm_key"],
-            norm_type=entry["norm_type"],
-            jurisdiction=entry.get("jurisdiction"),
-            year=entry.get("year"),
-            number=entry.get("number"),
-            suffix=entry.get("suffix"),
-            title=entry.get("title"),
-        )
-        summary["norms"] += 1
-        for alias in entry.get("aliases", []):
-            repo.add_alias(
-                norm_id=norm_id,
-                alias_text=alias["alias_text"],
-                alias_kind=alias.get("alias_kind", "OTHER"),
-                confidence=float(alias.get("confidence", 1.0)),
-                valid_from=alias.get("valid_from"),
-                valid_to=alias.get("valid_to"),
-            )
-            summary["aliases"] += 1
-        source_url = entry.get("source_url")
-        if source_url:
-            repo.get_or_create_source(
-                norm_id=norm_id,
-                source_kind=entry.get("source_kind", "OTHER"),
-                source_method="url_fetch",
-                url=source_url,
-                is_authoritative=bool(entry.get("is_authoritative", False)),
-                notes=entry.get("source_notes"),
-            )
-            repo.set_norm_status(norm_id, "HAS_SOURCE")
-            summary["sources"] += 1
     typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
