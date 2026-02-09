@@ -19,6 +19,7 @@ from .paths import config_path, data_dir, state_path
 from .planner import plan_all
 from .project import init_project
 from .services.manual_upload import upload_norm_pdf
+from .services.citations_service import run_citations
 from .services.norm_seed import seed_norms_from_yaml
 from .storage.norms_repo import NormsRepository
 from .storage_sqlite import DocumentStore
@@ -298,6 +299,65 @@ def structure(
         logging.getLogger("rg_atp_pipeline"),
     )
     typer.echo(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
+
+
+@app.command("citations")
+def citations(
+    doc_key: list[str] | None = typer.Option(
+        None,
+        "--doc-key",
+        help="Procesar documentos específicos (repetible).",
+    ),
+    limit_docs: int | None = typer.Option(
+        None, "--limit-docs", help="Máximo de documentos a procesar."
+    ),
+    llm: str = typer.Option(
+        "off",
+        "--llm",
+        help="Modo LLM: off | verify.",
+    ),
+    min_confidence: float = typer.Option(
+        0.7,
+        "--min-confidence",
+        help="Confianza mínima para aceptar sin LLM.",
+    ),
+    create_placeholders: bool = typer.Option(
+        True,
+        "--create-placeholders/--no-create-placeholders",
+        help="Crear placeholders en catálogo de normas.",
+    ),
+    batch_size: int | None = typer.Option(
+        None,
+        "--batch-size",
+        help="Batch size LLM (override de config).",
+    ),
+    ollama_model: str | None = typer.Option(
+        None,
+        "--ollama-model",
+        help="Modelo Ollama (override de config).",
+    ),
+    ollama_base_url: str | None = typer.Option(
+        None,
+        "--ollama-base-url",
+        help="Base URL Ollama (override de config).",
+    ),
+) -> None:
+    """Extract and resolve normative citations (Etapa 4)."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    summary = run_citations(
+        db_path=data_dir() / "state" / "rg_atp.sqlite",
+        data_dir=data_dir(),
+        doc_keys=doc_key,
+        limit_docs=limit_docs,
+        llm_mode=llm,
+        min_confidence=min_confidence,
+        create_placeholders=create_placeholders,
+        batch_size=batch_size,
+        ollama_model=ollama_model,
+        ollama_base_url=ollama_base_url,
+    )
+    typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
 @app.command("seed-norms")
