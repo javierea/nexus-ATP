@@ -94,7 +94,7 @@ def run_citations(
                 extracted = extract_candidates(unit.text)
                 candidates_total += len(extracted)
                 for candidate in extracted:
-                    citation_id, inserted = _insert_citation(
+                    citation_id, inserted = _get_or_create_citation_id(
                         conn,
                         doc_key,
                         unit,
@@ -150,13 +150,23 @@ def run_citations(
                     if not review:
                         continue
                     citation_id = review["citation_id"]
-                    inserted = _insert_review(
-                        conn,
-                        citation_id,
-                        ollama_model,
-                        prompt_version,
-                        review,
-                    )
+                    try:
+                        inserted = _insert_review(
+                            conn,
+                            citation_id,
+                            ollama_model,
+                            prompt_version,
+                            review,
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        _log_integrity_error(
+                            logger,
+                            conn,
+                            "citation_llm_reviews",
+                            exc,
+                            citation_id=citation_id,
+                        )
+                        raise
                     if inserted:
                         llm_verified += 1
                     reviews[citation_id] = review
@@ -170,14 +180,24 @@ def run_citations(
                 min_confidence,
             )
             if decision["status"] == "REJECTED":
-                _insert_link(
-                    conn,
-                    citation.citation_id,
-                    None,
-                    None,
-                    "REJECTED",
-                    decision["confidence"],
-                )
+                try:
+                    _insert_link(
+                        conn,
+                        citation.citation_id,
+                        None,
+                        None,
+                        "REJECTED",
+                        decision["confidence"],
+                    )
+                except sqlite3.IntegrityError as exc:
+                    _log_integrity_error(
+                        logger,
+                        conn,
+                        "citation_links",
+                        exc,
+                        citation=citation,
+                    )
+                    raise
                 rejected += 1
                 continue
 
@@ -189,14 +209,26 @@ def run_citations(
                 citation.candidate.raw_text,
             )
             if target_norm_id is not None:
-                _insert_link(
-                    conn,
-                    citation.citation_id,
-                    target_norm_id,
-                    target_norm_key,
-                    "RESOLVED",
-                    decision["confidence"],
-                )
+                try:
+                    _insert_link(
+                        conn,
+                        citation.citation_id,
+                        target_norm_id,
+                        target_norm_key,
+                        "RESOLVED",
+                        decision["confidence"],
+                    )
+                except sqlite3.IntegrityError as exc:
+                    _log_integrity_error(
+                        logger,
+                        conn,
+                        "citation_links",
+                        exc,
+                        citation=citation,
+                        target_norm_key=target_norm_key,
+                        target_norm_id=target_norm_id,
+                    )
+                    raise
                 resolved += 1
                 continue
 
@@ -204,34 +236,59 @@ def run_citations(
                 placeholder_key = key or _make_placeholder_key(
                     citation.candidate.raw_text
                 )
-                target_norm_id = repo.upsert_norm(
+                target_norm_id = _get_or_create_norm_id_by_key(
+                    conn,
                     placeholder_key,
                     norm_type or "OTRO",
+                    status="PLACEHOLDER",
                 )
-                repo.add_alias(
+                _add_norm_alias(
+                    conn,
                     target_norm_id,
                     citation.candidate.raw_text,
                     alias_kind="CITATION",
                     confidence=0.4,
                 )
-                _insert_link(
-                    conn,
-                    citation.citation_id,
-                    target_norm_id,
-                    placeholder_key,
-                    "PLACEHOLDER_CREATED",
-                    decision["confidence"],
-                )
+                try:
+                    _insert_link(
+                        conn,
+                        citation.citation_id,
+                        target_norm_id,
+                        placeholder_key,
+                        "PLACEHOLDER_CREATED",
+                        decision["confidence"],
+                    )
+                except sqlite3.IntegrityError as exc:
+                    _log_integrity_error(
+                        logger,
+                        conn,
+                        "citation_links",
+                        exc,
+                        citation=citation,
+                        target_norm_key=placeholder_key,
+                        target_norm_id=target_norm_id,
+                    )
+                    raise
                 placeholders_created += 1
             else:
-                _insert_link(
-                    conn,
-                    citation.citation_id,
-                    None,
-                    None,
-                    "UNRESOLVED",
-                    decision["confidence"],
-                )
+                try:
+                    _insert_link(
+                        conn,
+                        citation.citation_id,
+                        None,
+                        None,
+                        "UNRESOLVED",
+                        decision["confidence"],
+                    )
+                except sqlite3.IntegrityError as exc:
+                    _log_integrity_error(
+                        logger,
+                        conn,
+                        "citation_links",
+                        exc,
+                        citation=citation,
+                    )
+                    raise
                 unresolved += 1
 
     return {
@@ -340,42 +397,74 @@ def _units_from_structured(payload: dict[str, Any]) -> list[UnitPayload]:
     return units
 
 
-def _insert_citation(
+def _get_or_create_citation_id(
     conn: sqlite3.Connection,
     doc_key: str,
     unit: UnitPayload,
     candidate: Candidate,
 ) -> tuple[int, bool]:
     now = _utc_now()
-    cursor = conn.execute(
-        """
-        INSERT OR IGNORE INTO citations (
-            source_doc_key,
-            source_unit_id,
-            source_unit_type,
-            raw_text,
-            norm_type_guess,
-            norm_key_candidate,
-            evidence_snippet,
-            regex_confidence,
-            detected_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            doc_key,
-            unit.unit_id or None,
-            unit.unit_type or None,
-            candidate.raw_text,
-            candidate.norm_type_guess,
-            candidate.norm_key_candidate,
-            candidate.evidence_snippet,
-            candidate.regex_confidence,
-            now,
-        ),
+    unit_id = unit.unit_id or ""
+    params = (
+        doc_key,
+        unit_id,
+        unit.unit_type or None,
+        candidate.raw_text,
+        candidate.norm_type_guess,
+        candidate.norm_key_candidate,
+        candidate.evidence_snippet,
+        candidate.regex_confidence,
+        now,
     )
-    inserted = cursor.rowcount == 1
-    conn.commit()
+    inserted = False
+    try:
+        row = conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key,
+                source_unit_id,
+                source_unit_type,
+                raw_text,
+                norm_type_guess,
+                norm_key_candidate,
+                evidence_snippet,
+                regex_confidence,
+                detected_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(
+                source_doc_key,
+                source_unit_id,
+                raw_text,
+                evidence_snippet
+            ) DO NOTHING
+            RETURNING citation_id
+            """,
+            params,
+        ).fetchone()
+        if row:
+            return int(row["citation_id"]), True
+    except sqlite3.OperationalError as exc:
+        if "RETURNING" not in str(exc).upper():
+            raise
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO citations (
+                source_doc_key,
+                source_unit_id,
+                source_unit_type,
+                raw_text,
+                norm_type_guess,
+                norm_key_candidate,
+                evidence_snippet,
+                regex_confidence,
+                detected_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            params,
+        )
+        inserted = cursor.rowcount == 1
     row = conn.execute(
         """
         SELECT citation_id
@@ -387,11 +476,13 @@ def _insert_citation(
         """,
         (
             doc_key,
-            unit.unit_id,
+            unit_id,
             candidate.raw_text,
             candidate.evidence_snippet,
         ),
     ).fetchone()
+    if row is None:
+        raise sqlite3.IntegrityError("No se pudo obtener citation_id.")
     return int(row["citation_id"]), inserted
 
 
@@ -469,7 +560,6 @@ def _insert_review(
             now,
         ),
     )
-    conn.commit()
     return cursor.rowcount == 1
 
 
@@ -570,7 +660,6 @@ def _insert_link(
             now,
         ),
     )
-    conn.commit()
 
 
 def _has_link(conn: sqlite3.Connection, citation_id: int) -> bool:
@@ -585,3 +674,126 @@ def _chunked(items: list[CitationPayload], size: int) -> list[list[CitationPaylo
     if size <= 0:
         return [items]
     return [items[idx : idx + size] for idx in range(0, len(items), size)]
+
+
+def _add_norm_alias(
+    conn: sqlite3.Connection,
+    norm_id: int,
+    alias_text: str,
+    alias_kind: str = "OTHER",
+    confidence: float = 1.0,
+    valid_from: str | None = None,
+    valid_to: str | None = None,
+) -> None:
+    now = _utc_now()
+    conn.execute(
+        """
+        INSERT INTO norm_aliases (
+            norm_id,
+            alias_text,
+            alias_kind,
+            confidence,
+            valid_from,
+            valid_to,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(norm_id, alias_text) DO UPDATE SET
+            alias_kind = excluded.alias_kind,
+            confidence = excluded.confidence,
+            valid_from = excluded.valid_from,
+            valid_to = excluded.valid_to
+        """,
+        (
+            norm_id,
+            alias_text,
+            alias_kind,
+            confidence,
+            valid_from,
+            valid_to,
+            now,
+        ),
+    )
+
+
+def _get_or_create_norm_id_by_key(
+    conn: sqlite3.Connection,
+    norm_key: str,
+    norm_type: str,
+    status: str,
+) -> int:
+    now = _utc_now()
+    row = conn.execute(
+        "SELECT norm_id FROM norms WHERE norm_key = ?",
+        (norm_key,),
+    ).fetchone()
+    if row:
+        return int(row["norm_id"])
+    conn.execute(
+        """
+        INSERT INTO norms (
+            norm_key,
+            norm_type,
+            jurisdiction,
+            year,
+            number,
+            suffix,
+            title,
+            status,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
+        ON CONFLICT(norm_key) DO NOTHING
+        """,
+        (norm_key, norm_type, status, now, now),
+    )
+    row = conn.execute(
+        "SELECT norm_id FROM norms WHERE norm_key = ?",
+        (norm_key,),
+    ).fetchone()
+    if row is None:
+        raise sqlite3.IntegrityError("No se pudo obtener norm_id.")
+    return int(row["norm_id"])
+
+
+def _log_integrity_error(
+    logger: logging.Logger,
+    conn: sqlite3.Connection,
+    table: str,
+    exc: sqlite3.IntegrityError,
+    citation: CitationPayload | None = None,
+    citation_id: int | None = None,
+    target_norm_key: str | None = None,
+    target_norm_id: int | None = None,
+) -> None:
+    raw_text = citation.candidate.raw_text if citation else ""
+    norm_key_candidate = citation.candidate.norm_key_candidate if citation else None
+    source_doc_key = citation.source_doc_key if citation else None
+    source_unit_id = citation.source_unit_id if citation else None
+    citation_id = citation_id if citation_id is not None else (
+        citation.citation_id if citation else None
+    )
+    logger.error(
+        "IntegrityError en %s: %s | doc_key=%s unit_id=%s citation_id=%s "
+        "norm_key_candidate=%s target_norm_key=%s target_norm_id=%s raw_text=%s",
+        table,
+        exc,
+        source_doc_key,
+        source_unit_id,
+        citation_id,
+        norm_key_candidate,
+        target_norm_key,
+        target_norm_id,
+        raw_text[:160],
+    )
+    if logger.isEnabledFor(logging.DEBUG):
+        rows = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if rows:
+            details = [
+                f"{row['table']}({row['rowid']})->{row['parent']}({row['fkid']})"
+                for row in rows
+            ]
+            logger.debug("foreign_key_check: %s", "; ".join(details))
+        else:
+            logger.debug("foreign_key_check: sin violaciones reportadas.")
