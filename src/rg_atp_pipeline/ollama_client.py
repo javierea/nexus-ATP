@@ -101,15 +101,18 @@ def _build_prompt(item: MissingDownloadCandidate) -> list[dict[str, str]]:
         "evidence_snippet": evidence,
         "page_number": item.page_number,
         "rules": [
-            "Si la evidencia menciona AFIP/ARCA u otro organismo ≠ ATP -> OTHER_ORG.",
+            "Si la evidencia menciona AFIP/ARCA, Comisión Arbitral/C.A. u otro organismo ≠ ATP -> OTHER_ORG.",
             "Si el número parece venir de miles/decimales (ej 1.895 -> OLD-1) -> DETECTION_ERROR.",
-            "Si menciona ATP/Administración Tributaria Provincial/Chaco -> ATP_MISSING.",
+            "Si menciona ATP/Administración Tributaria Provincial/Chaco o DGR (nombre anterior de ATP) -> ATP_MISSING.",
             "Si no hay señales claras -> UNKNOWN.",
         ],
         "output_schema": {
             "doc_key": "RES-2024-39-20-1 | OLD-2172 | OLD-1",
             "verdict": "ATP_MISSING | OTHER_ORG | DETECTION_ERROR | UNKNOWN",
-            "org_guess": "ATP Chaco | AFIP/ARCA | DGR/AGIP/Otro | Unknown",
+            "org_guess": (
+                "ATP Chaco | AFIP/ARCA | Comisión Arbitral/C.A. | "
+                "AGIP/Otro | Unknown"
+            ),
             "confidence": "0.0-1.0",
             "reason": "frase corta basada SOLO en evidencia",
         },
