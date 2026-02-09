@@ -5,6 +5,7 @@ from __future__ import annotations
 from .config import default_config, save_config
 from .paths import config_path, data_dir, state_path
 from .state import default_state, save_state
+from .storage.migrations import ensure_schema
 from .storage_sqlite import DocumentStore
 
 
@@ -18,6 +19,7 @@ def ensure_dirs() -> None:
         "raw_text",
         "structured",
         "state",
+        "state/seeds",
         "logs",
         "tmp",
     ]:
@@ -38,3 +40,4 @@ def init_project() -> None:
 
     store = DocumentStore(data_dir() / "state" / "rg_atp.sqlite")
     store.initialize()
+    ensure_schema(data_dir() / "state" / "rg_atp.sqlite")

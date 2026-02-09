@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import typer
+import yaml
 from pydantic import ValidationError
 
 from .config import Config, load_config
@@ -18,6 +19,9 @@ from .logging_utils import setup_logging
 from .paths import config_path, data_dir, state_path
 from .planner import plan_all
 from .project import init_project
+from .services.manual_upload import upload_norm_pdf
+from .storage.migrations import ensure_schema
+from .storage.norms_repo import NormsRepository
 from .storage_sqlite import DocumentStore
 from .state import State, load_state
 from .structure_segmenter import StructureOptions, run_structure
@@ -295,6 +299,143 @@ def structure(
         logging.getLogger("rg_atp_pipeline"),
     )
     typer.echo(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
+
+
+@app.command("seed-norms")
+def seed_norms() -> None:
+    """Seed norms and aliases from data/state/seeds/norms.yml."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    db_path = data_dir() / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    seeds_path = data_dir() / "state" / "seeds" / "norms.yml"
+    if not seeds_path.exists():
+        typer.secho(
+            f"Archivo de seeds no encontrado: {seeds_path}",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    data = yaml.safe_load(seeds_path.read_text()) or []
+    if not isinstance(data, list):
+        typer.secho("El YAML de seeds debe ser una lista.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    repo = NormsRepository(db_path)
+    summary = {"norms": 0, "aliases": 0, "sources": 0}
+    for entry in data:
+        norm_id = repo.upsert_norm(
+            norm_key=entry["norm_key"],
+            norm_type=entry["norm_type"],
+            jurisdiction=entry.get("jurisdiction"),
+            year=entry.get("year"),
+            number=entry.get("number"),
+            suffix=entry.get("suffix"),
+            title=entry.get("title"),
+        )
+        summary["norms"] += 1
+        for alias in entry.get("aliases", []):
+            repo.add_alias(
+                norm_id=norm_id,
+                alias_text=alias["alias_text"],
+                alias_kind=alias.get("alias_kind", "OTHER"),
+                confidence=float(alias.get("confidence", 1.0)),
+                valid_from=alias.get("valid_from"),
+                valid_to=alias.get("valid_to"),
+            )
+            summary["aliases"] += 1
+        source_url = entry.get("source_url")
+        if source_url:
+            repo.get_or_create_source(
+                norm_id=norm_id,
+                source_kind=entry.get("source_kind", "OTHER"),
+                source_method="url_fetch",
+                url=source_url,
+                is_authoritative=bool(entry.get("is_authoritative", False)),
+                notes=entry.get("source_notes"),
+            )
+            repo.set_norm_status(norm_id, "HAS_SOURCE")
+            summary["sources"] += 1
+    typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
+@app.command("upload-norm")
+def upload_norm(
+    norm_key: str = typer.Option(..., "--norm-key", help="Clave canónica de norma."),
+    file: Path = typer.Option(..., "--file", help="Ruta al PDF."),
+    source_kind: str = typer.Option(
+        "CONSOLIDATED_CURRENT",
+        "--source-kind",
+        help="Tipo de fuente.",
+    ),
+    authoritative: bool = typer.Option(
+        False,
+        "--authoritative/--no-authoritative",
+        help="Marca la fuente como prioritaria.",
+    ),
+    notes: str | None = typer.Option(None, "--notes", help="Notas opcionales."),
+    norm_type: str | None = typer.Option(
+        None,
+        "--norm-type",
+        help="Tipo de norma si hay que crear placeholder.",
+    ),
+) -> None:
+    """Upload manual PDF for a norm and register versioned source."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    summary = upload_norm_pdf(
+        db_path=data_dir() / "state" / "rg_atp.sqlite",
+        base_dir=data_dir(),
+        norm_key=norm_key,
+        file_path=file,
+        source_kind=source_kind,
+        is_authoritative=authoritative,
+        notes=notes,
+        norm_type=norm_type,
+    )
+    typer.echo(json.dumps(summary.__dict__, indent=2, ensure_ascii=False))
+
+
+@app.command("resolve-norm")
+def resolve_norm(
+    text: str = typer.Argument("", help="Texto libre a resolver."),
+    text_option: str | None = typer.Option(None, "--text", help="Texto libre."),
+) -> None:
+    """Resolve a norm based on alias text."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    query = text_option or text
+    if not query:
+        typer.secho("Debe proporcionar texto a resolver.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    repo = NormsRepository(data_dir() / "state" / "rg_atp.sqlite")
+    match = repo.resolve_norm_by_alias(query)
+    if not match:
+        typer.echo(
+            json.dumps(
+                {
+                    "query": query,
+                    "match": None,
+                    "message": "No se encontró coincidencia. "
+                    "Sugerido crear placeholder.",
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        raise typer.Exit(code=1)
+    norm_id, norm_key, confidence, alias_text = match
+    typer.echo(
+        json.dumps(
+            {
+                "query": query,
+                "norm_id": norm_id,
+                "norm_key": norm_key,
+                "confidence": confidence,
+                "matched_alias": alias_text,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
 
 
 @app.callback()
