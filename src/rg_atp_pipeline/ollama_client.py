@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Sequence
@@ -45,7 +46,7 @@ class OllamaClient:
             response = requests.post(
                 endpoint,
                 json=payload,
-                timeout=30,
+                timeout=60,
             )
         except requests.RequestException as exc:
             raise OllamaUnavailableError(
@@ -77,7 +78,9 @@ class OllamaReviewer(LLMReviewer):
                     doc_key=parsed.get("doc_key", item.doc_key),
                     verdict=parsed.get("verdict", "UNKNOWN"),
                     org_guess=parsed.get("org_guess", "Unknown"),
-                    confidence=float(parsed.get("confidence", 0.0)),
+                    confidence=_parse_confidence(
+                        parsed.get("confidence"), item.doc_key
+                    ),
                     reason=parsed.get("reason", "").strip()[:280],
                     status=item.status,
                     url=item.url,
@@ -98,9 +101,9 @@ def _build_prompt(item: MissingDownloadCandidate) -> list[dict[str, str]]:
         "evidence_snippet": evidence,
         "page_number": item.page_number,
         "rules": [
-            "Si la evidencia menciona AFIP/ARCA u otro organismo ≠ ATP -> OTHER_ORG.",
+            "Si la evidencia menciona AFIP/ARCA, Comisión Arbitral/C.A. u otro organismo ≠ ATP -> OTHER_ORG.",
             "Si el número parece venir de miles/decimales (ej 1.895 -> OLD-1) -> DETECTION_ERROR.",
-            "Si menciona ATP/Administración Tributaria Provincial/Chaco -> ATP_MISSING.",
+            "Si menciona ATP/Administración Tributaria Provincial/Chaco o DGR (nombre anterior de ATP) -> ATP_MISSING.",
             "Si no hay señales claras -> UNKNOWN.",
         ],
         "output_schema": {
@@ -135,3 +138,29 @@ def _parse_response(content: str) -> dict[str, object]:
             return json.loads(match.group(0))
         except json.JSONDecodeError:
             return {}
+
+
+def _parse_confidence(value: object, doc_key: str) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return _default_confidence(value, doc_key)
+        if "-" in cleaned:
+            cleaned = cleaned.split("-", 1)[0].strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return _default_confidence(value, doc_key)
+    if value is None:
+        return _default_confidence(value, doc_key)
+    return _default_confidence(value, doc_key)
+
+
+def _default_confidence(value: object, doc_key: str) -> float:
+    logger = logging.getLogger(__name__)
+    logger.warning(
+        "Ollama confidence inválido para %s: %r. Usando 0.0.", doc_key, value
+    )
+    return 0.0
