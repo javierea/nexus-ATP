@@ -32,6 +32,9 @@ _NEGATIVE_REFERENCE_REGEX = re.compile(
     re.IGNORECASE,
 )
 
+_TRUE_STRINGS = {"true", "1", "yes", "y", "si", "sí"}
+_FALSE_STRINGS = {"false", "0", "no", "n"}
+
 
 @dataclass(frozen=True)
 class UnitPayload:
@@ -706,7 +709,6 @@ def _candidate_payload(citation: CitationPayload) -> dict[str, Any]:
 
 
 def _normalize_review(result: dict[str, Any]) -> dict[str, Any] | None:
-    logger = logging.getLogger("rg_atp_pipeline.citations")
     candidate_id = result.get("candidate_id")
     if candidate_id is None:
         return None
@@ -715,22 +717,12 @@ def _normalize_review(result: dict[str, Any]) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         return None
     normalized_key = result.get("normalized_key")
-    is_reference = bool(result.get("is_reference"))
-    confidence = float(result.get("confidence") or 0.0)
+    is_reference = parse_bool(result.get("is_reference"))
+    confidence = _parse_confidence(result.get("confidence"))
     explanation = str(result.get("explanation") or "").strip()[:200]
 
-    if (
-        is_reference
-        and _NEGATIVE_REFERENCE_REGEX.search(explanation)
-    ):
-        if confidence >= 0.7:
-            is_reference = False
-        else:
-            logger.warning(
-                "Review inconsistente para citation_id=%s: is_reference=true con explicación negativa y confianza baja=%.3f.",
-                citation_id,
-                confidence,
-            )
+    if is_reference and _NEGATIVE_REFERENCE_REGEX.search(explanation):
+        is_reference = False
 
     return {
         "citation_id": citation_id,
@@ -740,6 +732,28 @@ def _normalize_review(result: dict[str, Any]) -> dict[str, Any] | None:
         "confidence": confidence,
         "explanation": explanation,
     }
+
+
+def parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+        return False
+    return False
+
+
+def _parse_confidence(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _insert_review(
