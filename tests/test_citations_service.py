@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 
 from rg_atp_pipeline.services import citations_service
-from rg_atp_pipeline.services.citations_service import _normalize_review, run_citations
+from rg_atp_pipeline.services.citations_service import _normalize_review, parse_bool, run_citations
 from rg_atp_pipeline.storage.migrations import ensure_schema
 from rg_atp_pipeline.storage.norms_repo import NormsRepository
 
@@ -384,22 +384,57 @@ def test_normalize_review_forces_not_reference_on_high_confidence_negative_expla
     assert review["is_reference"] is False
 
 
-def test_normalize_review_keeps_reference_on_low_confidence_negative_explanation(caplog):
-    with caplog.at_level("WARNING"):
-        review = _normalize_review(
-            {
-                "candidate_id": "1",
-                "is_reference": True,
-                "norm_type": "LEY",
-                "normalized_key": "LEY-83-F",
-                "confidence": 0.2,
-                "explanation": "Not a reference",
-            }
-        )
+def test_hardening_explanation_with_string_values():
+    review = _normalize_review(
+        {
+            "candidate_id": "1",
+            "is_reference": "true",
+            "norm_type": "LEY",
+            "normalized_key": "LEY-83-F",
+            "confidence": "0.99",
+            "explanation": "Not a reference",
+        }
+    )
 
     assert review is not None
-    assert review["is_reference"] is True
-    assert "Review inconsistente" in caplog.text
+    assert review["is_reference"] is False
+    assert review["confidence"] == 0.99
+
+
+def test_parse_bool():
+    assert parse_bool("false") is False
+    assert parse_bool("0") is False
+    assert parse_bool("no") is False
+    assert parse_bool("n") is False
+
+    assert parse_bool("true") is True
+    assert parse_bool("1") is True
+    assert parse_bool("yes") is True
+    assert parse_bool("si") is True
+    assert parse_bool("sí") is True
+    assert parse_bool("y") is True
+
+    assert parse_bool(True) is True
+    assert parse_bool(False) is False
+
+    assert parse_bool(0) is False
+    assert parse_bool(1) is True
+
+
+def test_normalize_review_forces_not_reference_on_negative_explanation_even_low_confidence():
+    review = _normalize_review(
+        {
+            "candidate_id": "1",
+            "is_reference": True,
+            "norm_type": "LEY",
+            "normalized_key": "LEY-83-F",
+            "confidence": 0.2,
+            "explanation": "Not a reference",
+        }
+    )
+
+    assert review is not None
+    assert review["is_reference"] is False
 
 
 def test_verify_pipeline_rejects_when_normalized_review_sets_not_reference(
