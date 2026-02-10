@@ -34,7 +34,7 @@ def test_citations_service_resolves_and_creates_placeholders(tmp_path: Path):
         create_placeholders=True,
     )
 
-    assert summary["citations_inserted"] >= 2
+    assert summary["citations_inserted_now"] >= 2
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -71,7 +71,7 @@ def test_citations_service_dedupes_duplicate_candidates(tmp_path: Path):
         create_placeholders=False,
     )
 
-    assert summary["citations_inserted"] == 1
+    assert summary["citations_inserted_now"] == 1
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -106,7 +106,7 @@ def test_citations_service_placeholder_fk(tmp_path: Path):
         create_placeholders=True,
     )
 
-    assert summary["placeholders_created"] == 1
+    assert summary["placeholders_created_now"] == 1
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -150,7 +150,7 @@ def test_citations_service_runs_twice_without_lock(tmp_path: Path):
             )
         )
 
-    assert summaries[0]["citations_inserted"] >= 1
+    assert summaries[0]["citations_inserted_now"] >= 1
 
 
 def test_citations_service_streamlit_rerun(tmp_path: Path):
@@ -185,6 +185,13 @@ def test_citations_service_streamlit_rerun(tmp_path: Path):
 
     assert first["docs_processed"] == 1
     assert second["docs_processed"] == 1
+    assert second["citations_inserted_now"] == 0
+    assert second["links_inserted_now"] == 0
+    assert second["links_updated_now"] == 0
+    assert second["placeholders_created_now"] == 0
+    assert second["reviews_inserted_now"] == 0
+    assert second["rejected_now"] == 0
+    assert second["links_status_totals"] == first["links_status_totals"]
 
 
 def test_citations_summary_matches_effective_changes(tmp_path: Path):
@@ -226,12 +233,14 @@ def test_citations_summary_matches_effective_changes(tmp_path: Path):
             citations_service.logging.getLogger("test.citations"),
         )
 
-    assert first["links_inserted"] == 2
-    assert first["links_updated"] == 0
-    assert second["links_inserted"] == 0
-    assert second["links_updated"] == 0
+    assert first["links_inserted_now"] == 2
+    assert first["links_updated_now"] == 0
+    assert second["links_inserted_now"] == 0
+    assert second["links_updated_now"] == 0
     assert counts.get("RESOLVED", 0) == 1
     assert counts.get("PLACEHOLDER_CREATED", 0) == 1
+    assert first["links_status_totals"] == counts
+    assert second["links_status_totals"] == counts
 
 
 def test_citations_idempotent_single_link_per_citation(tmp_path: Path):
@@ -305,7 +314,7 @@ def test_citations_rejected_only_from_llm_verify(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
 
-    run_citations(
+    summary = run_citations(
         db_path=db_path,
         data_dir=data_dir,
         doc_keys=[doc_key],
@@ -315,6 +324,8 @@ def test_citations_rejected_only_from_llm_verify(monkeypatch, tmp_path: Path):
         create_placeholders=False,
         llm_gate_regex_threshold=1.0,
     )
+
+    assert summary["rejected_now"] == 1
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -336,7 +347,7 @@ def test_citations_llm_off_never_creates_rejected(tmp_path: Path):
     db_path = data_dir / "state" / "rg_atp.sqlite"
     ensure_schema(db_path)
 
-    run_citations(
+    summary = run_citations(
         db_path=db_path,
         data_dir=data_dir,
         doc_keys=[doc_key],
@@ -345,6 +356,8 @@ def test_citations_llm_off_never_creates_rejected(tmp_path: Path):
         min_confidence=0.95,
         create_placeholders=False,
     )
+
+    assert summary["rejected_now"] == 0
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row

@@ -70,17 +70,14 @@ def run_citations(
         available_docs = available_docs[:limit_docs]
 
     candidates_total = 0
-    citations_inserted = 0
-    llm_verified = 0
-    links_inserted = 0
-    links_updated = 0
-    status_changes = {
-        "REJECTED": 0,
-        "RESOLVED": 0,
-        "PLACEHOLDER_CREATED": 0,
-        "UNRESOLVED": 0,
-    }
+    citations_inserted_now = 0
+    reviews_inserted_now = 0
+    links_inserted_now = 0
+    links_updated_now = 0
+    placeholders_created_now = 0
+    rejected_now = 0
     errors = 0
+    links_status_totals: dict[str, int] = {}
 
     citations: list[CitationPayload] = []
     conn = _connect(db_path, logger)
@@ -123,7 +120,7 @@ def run_citations(
                             )
                             raise
                         if inserted:
-                            citations_inserted += 1
+                            citations_inserted_now += 1
                         citations.append(
                             CitationPayload(
                                 citation_id=citation_id,
@@ -213,7 +210,7 @@ def run_citations(
                             )
                             raise
                         if inserted:
-                            llm_verified += 1
+                            reviews_inserted_now += 1
                         reviews[citation_id] = review
 
             for citation in citations:
@@ -234,10 +231,10 @@ def run_citations(
                             "REJECTED",
                             decision["confidence"],
                         )
-                        links_inserted += int(action == "inserted")
-                        links_updated += int(action == "updated")
+                        links_inserted_now += int(action == "inserted")
+                        links_updated_now += int(action == "updated")
                         if action is not None:
-                            status_changes["REJECTED"] += 1
+                            rejected_now += 1
                     except sqlite3.IntegrityError as exc:
                         _log_integrity_error(
                             logger,
@@ -281,10 +278,8 @@ def run_citations(
                             resolved_status,
                             decision["confidence"],
                         )
-                        links_inserted += int(action == "inserted")
-                        links_updated += int(action == "updated")
-                        if action is not None:
-                            status_changes[resolved_status] += 1
+                        links_inserted_now += int(action == "inserted")
+                        links_updated_now += int(action == "updated")
                     except sqlite3.IntegrityError as exc:
                         _log_integrity_error(
                             logger,
@@ -313,12 +308,13 @@ def run_citations(
                         citation.candidate.raw_text
                     )
                     try:
-                        target_norm_id = _get_or_create_norm_id_by_key(
+                        target_norm_id, placeholder_created = _get_or_create_norm_id_by_key(
                             conn,
                             placeholder_key,
                             norm_type or "OTRO",
                             status="PLACEHOLDER",
                         )
+                        placeholders_created_now += int(placeholder_created)
                         _add_norm_alias(
                             conn,
                             target_norm_id,
@@ -344,10 +340,8 @@ def run_citations(
                             "PLACEHOLDER_CREATED",
                             decision["confidence"],
                         )
-                        links_inserted += int(action == "inserted")
-                        links_updated += int(action == "updated")
-                        if action is not None:
-                            status_changes["PLACEHOLDER_CREATED"] += 1
+                        links_inserted_now += int(action == "inserted")
+                        links_updated_now += int(action == "updated")
                     except sqlite3.IntegrityError as exc:
                         _log_integrity_error(
                             logger,
@@ -379,10 +373,8 @@ def run_citations(
                             "UNRESOLVED",
                             decision["confidence"],
                         )
-                        links_inserted += int(action == "inserted")
-                        links_updated += int(action == "updated")
-                        if action is not None:
-                            status_changes["UNRESOLVED"] += 1
+                        links_inserted_now += int(action == "inserted")
+                        links_updated_now += int(action == "updated")
                     except sqlite3.IntegrityError as exc:
                         _log_integrity_error(
                             logger,
@@ -400,6 +392,7 @@ def run_citations(
                             citation=citation,
                         )
                         raise
+            links_status_totals = _count_links_by_status(conn, logger)
     finally:
         conn.close()
         logger.info("Cerrada conexión SQLite: %s", db_path)
@@ -407,14 +400,13 @@ def run_citations(
     return {
         "docs_processed": len(available_docs),
         "candidates_total": candidates_total,
-        "citations_inserted": citations_inserted,
-        "links_inserted": links_inserted,
-        "links_updated": links_updated,
-        "llm_verified": llm_verified,
-        "rejected": status_changes["REJECTED"],
-        "resolved": status_changes["RESOLVED"],
-        "placeholders_created": status_changes["PLACEHOLDER_CREATED"],
-        "unresolved": status_changes["UNRESOLVED"],
+        "citations_inserted_now": citations_inserted_now,
+        "links_inserted_now": links_inserted_now,
+        "links_updated_now": links_updated_now,
+        "placeholders_created_now": placeholders_created_now,
+        "reviews_inserted_now": reviews_inserted_now,
+        "rejected_now": rejected_now,
+        "links_status_totals": links_status_totals,
         "errors": errors,
     }
 
@@ -903,15 +895,15 @@ def _get_or_create_norm_id_by_key(
     norm_key: str,
     norm_type: str,
     status: str,
-) -> int:
+) -> tuple[int, bool]:
     now = _utc_now()
     row = conn.execute(
         "SELECT norm_id FROM norms WHERE norm_key = ?",
         (norm_key,),
     ).fetchone()
     if row:
-        return int(row["norm_id"])
-    conn.execute(
+        return int(row["norm_id"]), False
+    cursor = conn.execute(
         """
         INSERT INTO norms (
             norm_key,
@@ -930,13 +922,14 @@ def _get_or_create_norm_id_by_key(
         """,
         (norm_key, norm_type, status, now, now),
     )
+    created = cursor.rowcount == 1
     row = conn.execute(
         "SELECT norm_id FROM norms WHERE norm_key = ?",
         (norm_key,),
     ).fetchone()
     if row is None:
         raise sqlite3.IntegrityError("No se pudo obtener norm_id.")
-    return int(row["norm_id"])
+    return int(row["norm_id"]), created
 
 
 def _log_integrity_error(
