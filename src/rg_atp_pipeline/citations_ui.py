@@ -22,7 +22,7 @@ def render_citations_stage(db_path: Path) -> None:
 
     llm_mode = st.radio(
         "Modo LLM",
-        ["off", "verify"],
+        ["off", "verify", "verify_all"],
         index=0,
         horizontal=True,
         key="citations_llm_mode",
@@ -50,9 +50,11 @@ def render_citations_stage(db_path: Path) -> None:
         ollama_base_url = config.ollama_base_url
         ollama_model = config.ollama_model
         batch_size = config.llm_batch_size
+        prompt_version = config.llm_prompt_version
+        llm_gate_regex_threshold = config.llm_gate_regex_threshold
 
         st.markdown("**Overrides Ollama (opcional)**")
-        overrides_disabled = llm_mode != "verify"
+        overrides_disabled = llm_mode not in {"verify", "verify_all"}
         ollama_base_url = st.text_input(
             "Base URL Ollama",
             value=config.ollama_base_url,
@@ -70,7 +72,20 @@ def render_citations_stage(db_path: Path) -> None:
             step=1,
             disabled=overrides_disabled,
         )
-        if llm_mode == "verify":
+        prompt_version = st.text_input(
+            "Prompt version",
+            value=config.llm_prompt_version,
+            disabled=overrides_disabled,
+        )
+        llm_gate_regex_threshold = st.slider(
+            "Threshold gating regex (LLM)",
+            0.0,
+            1.0,
+            float(config.llm_gate_regex_threshold),
+            0.01,
+            disabled=overrides_disabled,
+        )
+        if llm_mode in {"verify", "verify_all"}:
             test_ollama = st.form_submit_button("Probar conexión Ollama")
         else:
             test_ollama = False
@@ -104,9 +119,11 @@ def render_citations_stage(db_path: Path) -> None:
                     llm_mode=llm_mode,
                     min_confidence=min_confidence,
                     create_placeholders=create_placeholders,
-                    batch_size=int(batch_size) if llm_mode == "verify" else None,
-                    ollama_model=ollama_model if llm_mode == "verify" else None,
-                    ollama_base_url=ollama_base_url if llm_mode == "verify" else None,
+                    batch_size=int(batch_size) if llm_mode in {"verify", "verify_all"} else None,
+                    ollama_model=ollama_model if llm_mode in {"verify", "verify_all"} else None,
+                    ollama_base_url=ollama_base_url if llm_mode in {"verify", "verify_all"} else None,
+                    prompt_version=prompt_version,
+                    llm_gate_regex_threshold=llm_gate_regex_threshold,
                 )
         except Exception as exc:  # noqa: BLE001 - show runtime errors.
             st.error(f"Error al ejecutar Etapa 4: {exc}")

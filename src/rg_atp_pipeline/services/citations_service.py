@@ -106,6 +106,10 @@ def run_citations(
     rejected_now = 0
     errors = 0
     links_status_totals: dict[str, int] = {}
+    llm_total_citations = 0
+    llm_gated_count = 0
+    llm_skipped_already_reviewed_count = 0
+    llm_batches_sent = 0
 
     citations: list[CitationPayload] = []
     conn = _connect(db_path, logger)
@@ -175,27 +179,46 @@ def run_citations(
                 )
 
             reviews = {}
-            if llm_mode == "verify":
-                gated = [
-                    citation
-                    for citation in citations
-                    if _needs_llm_review(
-                        citation.candidate,
-                        llm_gate_regex_threshold,
-                    )
-                    and not _has_review(
-                        conn,
-                        citation.citation_id,
-                        ollama_model,
-                        prompt_version,
-                    )
-                ]
+            llm_total_citations = len(citations)
+            if llm_mode in {"verify", "verify_all"}:
+                gated: list[CitationPayload] = []
+                if llm_mode == "verify":
+                    for citation in citations:
+                        if not _needs_llm_review(
+                            citation.candidate,
+                            llm_gate_regex_threshold,
+                        ):
+                            continue
+                        if _has_review(
+                            conn,
+                            citation.citation_id,
+                            ollama_model,
+                            prompt_version,
+                        ):
+                            llm_skipped_already_reviewed_count += 1
+                            continue
+                        gated.append(citation)
+                else:
+                    for citation in citations:
+                        if _has_review(
+                            conn,
+                            citation.citation_id,
+                            ollama_model,
+                            prompt_version,
+                        ):
+                            llm_skipped_already_reviewed_count += 1
+                            continue
+                        gated.append(citation)
+                llm_gated_count = len(gated)
                 logger.info(
-                    "Stage 4 verify candidates: total_citations=%s gated=%s",
+                    "Stage 4 verify candidates: total_citations=%s gated=%s skipped_already_reviewed=%s mode=%s",
                     len(citations),
                     len(gated),
+                    llm_skipped_already_reviewed_count,
+                    llm_mode,
                 )
                 for batch in _chunked(gated, batch_size):
+                    llm_batches_sent += 1
                     payload = [
                         _candidate_payload(item)
                         for item in batch
@@ -441,6 +464,13 @@ def run_citations(
         "rejected_now": rejected_now,
         "links_status_totals": links_status_totals,
         "errors": errors,
+        "llm_mode_effective": llm_mode,
+        "prompt_version_effective": prompt_version,
+        "model_effective": ollama_model,
+        "total_citations": llm_total_citations,
+        "gated_count": llm_gated_count,
+        "skipped_already_reviewed_count": llm_skipped_already_reviewed_count,
+        "batches_sent": llm_batches_sent,
     }
 
 
@@ -834,7 +864,7 @@ def _decide_reference(
     llm_mode: str,
     min_confidence: float,
 ) -> dict[str, Any]:
-    if llm_mode == "verify" and review is not None:
+    if llm_mode in {"verify", "verify_all"} and review is not None:
         if not review["is_reference"]:
             return {"status": "REJECTED", "confidence": review["confidence"]}
         key = review["normalized_key"] or citation.candidate.norm_key_candidate

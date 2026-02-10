@@ -659,3 +659,103 @@ def test_normalize_rejected_links_semantics_reclassifies_non_negative_reviews(tm
 
     second = citations_service.normalize_rejected_links_semantics(db_path)
     assert second["updated_rows"] == 0
+
+
+def test_verify_all_inserts_reviews(monkeypatch, tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-013"
+    (raw_text_dir / f"{doc_key}.txt").write_text("Ley 83-F. Ley 9999-Z.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    calls = {"count": 0}
+
+    def fake_verify_candidates(payload, **_kwargs):
+        calls["count"] += 1
+        return [
+            {
+                "candidate_id": item["candidate_id"],
+                "is_reference": True,
+                "norm_type": item["norm_type_guess"] or "LEY",
+                "normalized_key": item["norm_key_candidate"] or "LEY-83-F",
+                "confidence": 0.99,
+                "explanation": "reference",
+            }
+            for item in payload
+        ]
+
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    summary = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="verify_all",
+        min_confidence=0.7,
+        create_placeholders=False,
+        batch_size=1,
+    )
+
+    assert calls["count"] > 0
+    assert summary["llm_mode_effective"] == "verify_all"
+    assert summary["gated_count"] > 0
+    assert summary["batches_sent"] == summary["gated_count"]
+    assert summary["reviews_inserted_now"] == summary["gated_count"]
+
+    with sqlite3.connect(db_path) as conn:
+        reviews = conn.execute("SELECT COUNT(*) FROM citation_llm_reviews").fetchone()[0]
+
+    assert reviews == summary["reviews_inserted_now"]
+
+
+def test_prompt_version_override_visible(monkeypatch, tmp_path: Path, caplog):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-014"
+    (raw_text_dir / f"{doc_key}.txt").write_text("Ley 83-F.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    def fake_verify_candidates(payload, **_kwargs):
+        return [
+            {
+                "candidate_id": item["candidate_id"],
+                "is_reference": True,
+                "norm_type": "LEY",
+                "normalized_key": item["norm_key_candidate"] or "LEY-83-F",
+                "confidence": 0.99,
+                "explanation": "reference",
+            }
+            for item in payload
+        ]
+
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    with caplog.at_level("INFO", logger="rg_atp_pipeline.citations"):
+        summary = run_citations(
+            db_path=db_path,
+            data_dir=data_dir,
+            doc_keys=[doc_key],
+            limit_docs=None,
+            llm_mode="verify_all",
+            min_confidence=0.7,
+            create_placeholders=False,
+            prompt_version="citref-v2",
+        )
+
+    assert summary["prompt_version_effective"] == "citref-v2"
+    assert summary["reviews_inserted_now"] > 0
+    assert "prompt_version=citref-v2" in caplog.text
+
+    with sqlite3.connect(db_path) as conn:
+        prompt_versions = conn.execute(
+            "SELECT DISTINCT prompt_version FROM citation_llm_reviews"
+        ).fetchall()
+
+    assert [row[0] for row in prompt_versions] == ["citref-v2"]
