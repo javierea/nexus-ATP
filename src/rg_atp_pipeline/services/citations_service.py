@@ -72,10 +72,14 @@ def run_citations(
     candidates_total = 0
     citations_inserted = 0
     llm_verified = 0
-    rejected = 0
-    resolved = 0
-    placeholders_created = 0
-    unresolved = 0
+    links_inserted = 0
+    links_updated = 0
+    status_changes = {
+        "REJECTED": 0,
+        "RESOLVED": 0,
+        "PLACEHOLDER_CREATED": 0,
+        "UNRESOLVED": 0,
+    }
     errors = 0
 
     citations: list[CitationPayload] = []
@@ -222,7 +226,7 @@ def run_citations(
                 )
                 if decision["status"] == "REJECTED":
                     try:
-                        _insert_link(
+                        action = _upsert_link(
                             conn,
                             citation.citation_id,
                             None,
@@ -230,6 +234,10 @@ def run_citations(
                             "REJECTED",
                             decision["confidence"],
                         )
+                        links_inserted += int(action == "inserted")
+                        links_updated += int(action == "updated")
+                        if action is not None:
+                            status_changes["REJECTED"] += 1
                     except sqlite3.IntegrityError as exc:
                         _log_integrity_error(
                             logger,
@@ -248,24 +256,35 @@ def run_citations(
                         )
                         raise
                     continue
+                if decision["status"] == "SKIPPED":
+                    continue
 
                 norm_type = decision["norm_type"]
                 key = decision["norm_key"]
-                target_norm_id, target_norm_key = _resolve_norm(
+                target_norm_id, target_norm_key, target_norm_status = _resolve_norm(
                     repo,
                     key,
                     citation.candidate.raw_text,
                 )
                 if target_norm_id is not None:
+                    resolved_status = (
+                        "PLACEHOLDER_CREATED"
+                        if target_norm_status == "PLACEHOLDER"
+                        else "RESOLVED"
+                    )
                     try:
-                        _insert_link(
+                        action = _upsert_link(
                             conn,
                             citation.citation_id,
                             target_norm_id,
                             target_norm_key,
-                            "RESOLVED",
+                            resolved_status,
                             decision["confidence"],
                         )
+                        links_inserted += int(action == "inserted")
+                        links_updated += int(action == "updated")
+                        if action is not None:
+                            status_changes[resolved_status] += 1
                     except sqlite3.IntegrityError as exc:
                         _log_integrity_error(
                             logger,
@@ -317,7 +336,7 @@ def run_citations(
                         )
                         raise
                     try:
-                        _insert_link(
+                        action = _upsert_link(
                             conn,
                             citation.citation_id,
                             target_norm_id,
@@ -325,6 +344,10 @@ def run_citations(
                             "PLACEHOLDER_CREATED",
                             decision["confidence"],
                         )
+                        links_inserted += int(action == "inserted")
+                        links_updated += int(action == "updated")
+                        if action is not None:
+                            status_changes["PLACEHOLDER_CREATED"] += 1
                     except sqlite3.IntegrityError as exc:
                         _log_integrity_error(
                             logger,
@@ -348,7 +371,7 @@ def run_citations(
                         raise
                 else:
                     try:
-                        _insert_link(
+                        action = _upsert_link(
                             conn,
                             citation.citation_id,
                             None,
@@ -356,6 +379,10 @@ def run_citations(
                             "UNRESOLVED",
                             decision["confidence"],
                         )
+                        links_inserted += int(action == "inserted")
+                        links_updated += int(action == "updated")
+                        if action is not None:
+                            status_changes["UNRESOLVED"] += 1
                     except sqlite3.IntegrityError as exc:
                         _log_integrity_error(
                             logger,
@@ -374,23 +401,20 @@ def run_citations(
                         )
                         raise
     finally:
-        link_counts = _count_links_by_status(conn, logger)
         conn.close()
         logger.info("Cerrada conexión SQLite: %s", db_path)
-    rejected = link_counts.get("REJECTED", 0)
-    resolved = link_counts.get("RESOLVED", 0)
-    placeholders_created = link_counts.get("PLACEHOLDER_CREATED", 0)
-    unresolved = link_counts.get("UNRESOLVED", 0)
 
     return {
         "docs_processed": len(available_docs),
         "candidates_total": candidates_total,
         "citations_inserted": citations_inserted,
+        "links_inserted": links_inserted,
+        "links_updated": links_updated,
         "llm_verified": llm_verified,
-        "rejected": rejected,
-        "resolved": resolved,
-        "placeholders_created": placeholders_created,
-        "unresolved": unresolved,
+        "rejected": status_changes["REJECTED"],
+        "resolved": status_changes["RESOLVED"],
+        "placeholders_created": status_changes["PLACEHOLDER_CREATED"],
+        "unresolved": status_changes["UNRESOLVED"],
         "errors": errors,
     }
 
@@ -718,7 +742,7 @@ def _decide_reference(
             "confidence": review["confidence"],
         }
     if citation.candidate.regex_confidence < min_confidence:
-        return {"status": "REJECTED", "confidence": citation.candidate.regex_confidence}
+        return {"status": "SKIPPED", "confidence": citation.candidate.regex_confidence}
     return {
         "status": "ACCEPTED",
         "norm_type": citation.candidate.norm_type_guess,
@@ -731,16 +755,16 @@ def _resolve_norm(
     repo: NormsRepository,
     key: str | None,
     raw_text: str,
-) -> tuple[int | None, str | None]:
+) -> tuple[int | None, str | None, str | None]:
     if key:
         norm = repo.get_norm(key)
         if norm:
-            return norm.norm_id, norm.norm_key
+            return norm.norm_id, norm.norm_key, norm.status
     alias = repo.resolve_norm_by_alias(raw_text)
     if alias:
         norm_id, norm_key, _, _ = alias
-        return norm_id, norm_key
-    return None, None
+        return norm_id, norm_key, None
+    return None, None, None
 
 
 def _make_placeholder_key(raw_text: str) -> str:
@@ -749,16 +773,35 @@ def _make_placeholder_key(raw_text: str) -> str:
     return f"UNK-{digest}"
 
 
-def _insert_link(
+def _upsert_link(
     conn: sqlite3.Connection,
     citation_id: int,
     target_norm_id: int | None,
     target_norm_key: str | None,
     status: str,
     confidence: float,
-) -> None:
-    if _has_link(conn, citation_id):
-        return
+) -> str | None:
+    previous = conn.execute(
+        """
+        SELECT
+            target_norm_id,
+            target_norm_key,
+            resolution_status,
+            resolution_confidence
+        FROM citation_links
+        WHERE citation_id = ?
+        """,
+        (citation_id,),
+    ).fetchone()
+    if previous is not None and not _link_changed(
+        previous,
+        target_norm_id,
+        target_norm_key,
+        status,
+        confidence,
+    ):
+        return None
+
     now = _utc_now()
     conn.execute(
         """
@@ -771,6 +814,12 @@ def _insert_link(
             created_at
         )
         VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(citation_id) DO UPDATE SET
+            target_norm_id = excluded.target_norm_id,
+            target_norm_key = excluded.target_norm_key,
+            resolution_status = excluded.resolution_status,
+            resolution_confidence = excluded.resolution_confidence,
+            created_at = excluded.created_at
         """,
         (
             citation_id,
@@ -781,14 +830,26 @@ def _insert_link(
             now,
         ),
     )
+    if previous is None:
+        return "inserted"
+    return "updated"
 
 
-def _has_link(conn: sqlite3.Connection, citation_id: int) -> bool:
-    row = conn.execute(
-        "SELECT link_id FROM citation_links WHERE citation_id = ?",
-        (citation_id,),
-    ).fetchone()
-    return row is not None
+def _link_changed(
+    previous: sqlite3.Row,
+    target_norm_id: int | None,
+    target_norm_key: str | None,
+    status: str,
+    confidence: float,
+) -> bool:
+    return any(
+        [
+            previous["target_norm_id"] != target_norm_id,
+            previous["target_norm_key"] != target_norm_key,
+            previous["resolution_status"] != status,
+            abs(float(previous["resolution_confidence"]) - float(confidence)) > 1e-9,
+        ]
+    )
 
 
 def _chunked(items: list[CitationPayload], size: int) -> list[list[CitationPayload]]:

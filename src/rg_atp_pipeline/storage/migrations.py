@@ -128,13 +128,42 @@ def ensure_schema(db_path: Path) -> None:
                 citation_id INTEGER NOT NULL,
                 target_norm_id INTEGER,
                 target_norm_key TEXT,
-                resolution_status TEXT NOT NULL,
+                resolution_status TEXT NOT NULL CHECK(
+                    resolution_status IN (
+                        'REJECTED',
+                        'RESOLVED',
+                        'PLACEHOLDER_CREATED',
+                        'UNRESOLVED'
+                    )
+                ),
                 resolution_confidence REAL NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(citation_id) REFERENCES citations(citation_id),
                 FOREIGN KEY(target_norm_id) REFERENCES norms(norm_id)
             )
             """
+        )
+        conn.execute(
+            """
+            DELETE FROM citation_links
+            WHERE link_id IN (
+                SELECT old.link_id
+                FROM citation_links AS old
+                JOIN citation_links AS newest
+                    ON newest.citation_id = old.citation_id
+                   AND (
+                        newest.created_at > old.created_at
+                        OR (
+                            newest.created_at = old.created_at
+                            AND newest.link_id > old.link_id
+                        )
+                   )
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_citation_links_citation_id "
+            "ON citation_links(citation_id)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_citations_doc_key "

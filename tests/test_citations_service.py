@@ -1,6 +1,7 @@
 import sqlite3
 from pathlib import Path
 
+from rg_atp_pipeline.services import citations_service
 from rg_atp_pipeline.services.citations_service import run_citations
 from rg_atp_pipeline.storage.migrations import ensure_schema
 from rg_atp_pipeline.storage.norms_repo import NormsRepository
@@ -186,7 +187,7 @@ def test_citations_service_streamlit_rerun(tmp_path: Path):
     assert second["docs_processed"] == 1
 
 
-def test_citations_summary_matches_db_counts(tmp_path: Path):
+def test_citations_summary_matches_effective_changes(tmp_path: Path):
     data_dir = tmp_path / "data"
     raw_text_dir = data_dir / "raw_text"
     raw_text_dir.mkdir(parents=True)
@@ -199,7 +200,16 @@ def test_citations_summary_matches_db_counts(tmp_path: Path):
     repo = NormsRepository(db_path)
     repo.upsert_norm("LEY-83-F", "LEY")
 
-    summary = run_citations(
+    first = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="off",
+        min_confidence=0.7,
+        create_placeholders=True,
+    )
+    second = run_citations(
         db_path=db_path,
         data_dir=data_dir,
         doc_keys=[doc_key],
@@ -211,16 +221,135 @@ def test_citations_summary_matches_db_counts(tmp_path: Path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT resolution_status, COUNT(*) AS total
-            FROM citation_links
-            GROUP BY resolution_status
-            """
-        ).fetchall()
-        counts = {row["resolution_status"]: row["total"] for row in rows}
+        counts = citations_service._count_links_by_status(  # noqa: SLF001
+            conn,
+            citations_service.logging.getLogger("test.citations"),
+        )
 
-    assert summary["resolved"] == counts.get("RESOLVED", 0)
-    assert summary["placeholders_created"] == counts.get("PLACEHOLDER_CREATED", 0)
-    assert summary["unresolved"] == counts.get("UNRESOLVED", 0)
-    assert summary["rejected"] == counts.get("REJECTED", 0)
+    assert first["links_inserted"] == 2
+    assert first["links_updated"] == 0
+    assert second["links_inserted"] == 0
+    assert second["links_updated"] == 0
+    assert counts.get("RESOLVED", 0) == 1
+    assert counts.get("PLACEHOLDER_CREATED", 0) == 1
+
+
+def test_citations_idempotent_single_link_per_citation(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-007"
+    raw_text = "Ley 83-F y Ley 1234-A."
+    (raw_text_dir / f"{doc_key}.txt").write_text(raw_text, encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    repo = NormsRepository(db_path)
+    repo.upsert_norm("LEY-83-F", "LEY")
+
+    run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="off",
+        min_confidence=0.7,
+        create_placeholders=True,
+    )
+    run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="off",
+        min_confidence=0.7,
+        create_placeholders=True,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total_links,
+                COUNT(DISTINCT citation_id) AS distinct_citations
+            FROM citation_links
+            """
+        ).fetchone()
+
+    assert row["total_links"] == row["distinct_citations"]
+
+
+def test_citations_rejected_only_from_llm_verify(monkeypatch, tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-008"
+    raw_text = "Ley 83-F."
+    (raw_text_dir / f"{doc_key}.txt").write_text(raw_text, encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    def fake_verify_candidates(*_args, **_kwargs):
+        return [
+            {
+                "candidate_id": "1",
+                "is_reference": False,
+                "norm_type": "OTRO",
+                "normalized_key": None,
+                "confidence": 0.99,
+                "explanation": "not a legal citation",
+            }
+        ]
+
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="verify",
+        min_confidence=0.7,
+        create_placeholders=False,
+        llm_gate_regex_threshold=1.0,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT COUNT(*) AS total FROM citation_links WHERE resolution_status = 'REJECTED'"
+        ).fetchone()
+
+    assert row["total"] == 1
+
+
+def test_citations_llm_off_never_creates_rejected(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-009"
+    raw_text = "Ley 83-F."
+    (raw_text_dir / f"{doc_key}.txt").write_text(raw_text, encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="off",
+        min_confidence=0.95,
+        create_placeholders=False,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT COUNT(*) FROM citation_links WHERE resolution_status = 'REJECTED'"
+        ).fetchone()
+
+    assert row[0] == 0
