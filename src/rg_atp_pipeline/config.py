@@ -91,7 +91,7 @@ def default_config() -> Config:
             min_alpha_ratio=0.5,
         ),
         ollama_base_url="http://localhost:11434",
-        ollama_model="qwen2.5:7b-instruct",
+        ollama_model="qwen2.5:14b-instruct-q5_K_M",
         llm_prompt_version="citref-v1",
         llm_gate_regex_threshold=0.9,
         llm_batch_size=20,
