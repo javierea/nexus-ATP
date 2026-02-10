@@ -184,3 +184,43 @@ def test_citations_service_streamlit_rerun(tmp_path: Path):
 
     assert first["docs_processed"] == 1
     assert second["docs_processed"] == 1
+
+
+def test_citations_summary_matches_db_counts(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-006"
+    raw_text = "Ley 83-F y Ley 9999-Z."
+    (raw_text_dir / f"{doc_key}.txt").write_text(raw_text, encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    repo = NormsRepository(db_path)
+    repo.upsert_norm("LEY-83-F", "LEY")
+
+    summary = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="off",
+        min_confidence=0.7,
+        create_placeholders=True,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT resolution_status, COUNT(*) AS total
+            FROM citation_links
+            GROUP BY resolution_status
+            """
+        ).fetchall()
+        counts = {row["resolution_status"]: row["total"] for row in rows}
+
+    assert summary["resolved"] == counts.get("RESOLVED", 0)
+    assert summary["placeholders_created"] == counts.get("PLACEHOLDER_CREATED", 0)
+    assert summary["unresolved"] == counts.get("UNRESOLVED", 0)
+    assert summary["rejected"] == counts.get("REJECTED", 0)
