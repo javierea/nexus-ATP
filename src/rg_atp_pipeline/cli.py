@@ -19,7 +19,10 @@ from .paths import config_path, data_dir, state_path
 from .planner import plan_all
 from .project import init_project
 from .services.manual_upload import upload_norm_pdf
-from .services.citations_service import run_citations
+from .services.citations_service import (
+    normalize_rejected_links_semantics,
+    run_citations,
+)
 from .services.norm_seed import seed_norms_from_yaml
 from .storage.norms_repo import NormsRepository
 from .storage_sqlite import DocumentStore
@@ -356,6 +359,17 @@ def citations(
         batch_size=batch_size,
         ollama_model=ollama_model,
         ollama_base_url=ollama_base_url,
+    )
+    typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
+@app.command("citations-normalize-rejected")
+def citations_normalize_rejected() -> None:
+    """Normalizar semántica de REJECTED usando la última revisión LLM."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    summary = normalize_rejected_links_semantics(
+        db_path=data_dir() / "state" / "rg_atp.sqlite"
     )
     typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
 
