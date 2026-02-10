@@ -441,3 +441,91 @@ def test_verify_pipeline_rejects_when_normalized_review_sets_not_reference(
     )
 
     assert summary["rejected_now"] == 1
+
+
+def test_normalize_rejected_links_semantics_reclassifies_non_negative_reviews(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        now = "2026-01-01T00:00:00+00:00"
+        citations = [
+            ("RG-TEST", "", "", "Ley 1", "LEY", None, "snippet 1", 0.8, now),
+            ("RG-TEST", "", "", "Ley 2", "LEY", None, "snippet 2", 0.8, now),
+            ("RG-TEST", "", "", "Ley 3", "LEY", None, "snippet 3", 0.8, now),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO citations (
+                source_doc_key,
+                source_unit_id,
+                source_unit_type,
+                raw_text,
+                norm_type_guess,
+                norm_key_candidate,
+                evidence_snippet,
+                regex_confidence,
+                detected_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            citations,
+        )
+        conn.executemany(
+            """
+            INSERT INTO citation_links (
+                citation_id,
+                target_norm_id,
+                target_norm_key,
+                resolution_status,
+                resolution_confidence,
+                created_at
+            )
+            VALUES (?, NULL, NULL, 'REJECTED', 0.95, ?)
+            """,
+            [
+                (1, now),
+                (2, now),
+                (3, now),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO citation_llm_reviews (
+                citation_id,
+                llm_model,
+                prompt_version,
+                is_reference,
+                norm_type,
+                normalized_key,
+                llm_confidence,
+                explanation,
+                created_at
+            )
+            VALUES (?, 'model', ?, ?, 'LEY', NULL, 0.9, 'review', ?)
+            """,
+            [
+                (1, 'v1', 0, "2026-01-01T00:00:00+00:00"),
+                (2, 'v1', 1, "2026-01-01T00:00:00+00:00"),
+            ],
+        )
+        conn.commit()
+
+    summary = citations_service.normalize_rejected_links_semantics(db_path)
+    assert summary["updated_rows"] == 2
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT citation_id, resolution_status FROM citation_links ORDER BY citation_id"
+        ).fetchall()
+
+    assert [row["resolution_status"] for row in rows] == [
+        "REJECTED",
+        "UNRESOLVED",
+        "UNRESOLVED",
+    ]
+
+    second = citations_service.normalize_rejected_links_semantics(db_path)
+    assert second["updated_rows"] == 0

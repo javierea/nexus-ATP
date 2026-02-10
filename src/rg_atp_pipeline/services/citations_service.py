@@ -424,6 +424,55 @@ def run_citations(
     }
 
 
+def normalize_rejected_links_semantics(db_path: Path) -> dict[str, Any]:
+    """Reclassify rejected links without negative last LLM review as unresolved."""
+    ensure_schema(db_path)
+    logger = logging.getLogger("rg_atp_pipeline.citations")
+    conn = _connect(db_path, logger)
+    try:
+        with conn:
+            conn.execute(
+                """
+                WITH latest AS (
+                    SELECT citation_id, MAX(created_at) AS max_created_at
+                    FROM citation_llm_reviews
+                    GROUP BY citation_id
+                ),
+                last_review AS (
+                    SELECT lr.citation_id, lr.is_reference
+                    FROM citation_llm_reviews lr
+                    JOIN latest l
+                      ON lr.citation_id = l.citation_id
+                     AND lr.created_at = l.max_created_at
+                    WHERE lr.review_id = (
+                        SELECT MAX(tie.review_id)
+                        FROM citation_llm_reviews tie
+                        WHERE tie.citation_id = lr.citation_id
+                          AND tie.created_at = lr.created_at
+                    )
+                )
+                UPDATE citation_links
+                SET resolution_status = 'UNRESOLVED'
+                WHERE resolution_status = 'REJECTED'
+                  AND citation_id NOT IN (
+                    SELECT citation_id
+                    FROM last_review
+                    WHERE is_reference = 0
+                  )
+                """
+            )
+            updated_rows = conn.execute("SELECT changes()").fetchone()[0]
+            links_status_totals = _count_links_by_status(conn, logger)
+    finally:
+        conn.close()
+        logger.info("Cerrada conexión SQLite: %s", db_path)
+
+    return {
+        "updated_rows": updated_rows,
+        "links_status_totals": links_status_totals,
+    }
+
+
 def _connect(db_path: Path, logger: logging.Logger) -> sqlite3.Connection:
     logger.info("Abriendo conexión SQLite: %s", db_path)
     conn = sqlite3.connect(db_path, timeout=30)
