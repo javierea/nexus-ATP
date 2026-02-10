@@ -72,14 +72,26 @@ def run_citations(
     logger = logging.getLogger("rg_atp_pipeline.citations")
     config = load_config(config_path())
 
-    batch_size = batch_size or config.llm_batch_size
+    batch_size = config.llm_batch_size if batch_size is None else batch_size
     ollama_model = ollama_model or config.ollama_model
     ollama_base_url = ollama_base_url or config.ollama_base_url
     prompt_version = prompt_version or config.llm_prompt_version
     llm_gate_regex_threshold = (
-        llm_gate_regex_threshold or config.llm_gate_regex_threshold
+        config.llm_gate_regex_threshold
+        if llm_gate_regex_threshold is None
+        else llm_gate_regex_threshold
     )
-    llm_timeout_sec = llm_timeout_sec or config.llm_timeout_sec
+    llm_timeout_sec = config.llm_timeout_sec if llm_timeout_sec is None else llm_timeout_sec
+    llm_mode = str(llm_mode).strip().lower()
+
+    logger.info(
+        "Stage 4 LLM config: llm_mode=%r threshold=%s batch_size=%s prompt_version=%s model=%s",
+        llm_mode,
+        llm_gate_regex_threshold,
+        batch_size,
+        prompt_version,
+        ollama_model,
+    )
 
     available_docs = _collect_doc_keys(data_dir, doc_keys)
     if limit_docs is not None:
@@ -178,6 +190,11 @@ def run_citations(
                         prompt_version,
                     )
                 ]
+                logger.info(
+                    "Stage 4 verify candidates: total_citations=%s gated=%s",
+                    len(citations),
+                    len(gated),
+                )
                 for batch in _chunked(gated, batch_size):
                     payload = [
                         _candidate_payload(item)
