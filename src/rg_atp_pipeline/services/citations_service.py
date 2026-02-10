@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,18 @@ from rg_atp_pipeline.services.reference_extractor import Candidate, extract_cand
 from rg_atp_pipeline.storage.migrations import ensure_schema
 from rg_atp_pipeline.storage.norms_repo import NormsRepository
 from rg_atp_pipeline.utils.normalize import normalize_text
+
+
+_NEGATIVE_REFERENCE_PATTERNS = (
+    "not a reference",
+    "no es una referencia",
+    "not a legal reference",
+    "not a normative reference",
+)
+_NEGATIVE_REFERENCE_REGEX = re.compile(
+    "|".join(re.escape(pattern) for pattern in _NEGATIVE_REFERENCE_PATTERNS),
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -644,6 +657,7 @@ def _candidate_payload(citation: CitationPayload) -> dict[str, Any]:
 
 
 def _normalize_review(result: dict[str, Any]) -> dict[str, Any] | None:
+    logger = logging.getLogger("rg_atp_pipeline.citations")
     candidate_id = result.get("candidate_id")
     if candidate_id is None:
         return None
@@ -652,13 +666,30 @@ def _normalize_review(result: dict[str, Any]) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         return None
     normalized_key = result.get("normalized_key")
+    is_reference = bool(result.get("is_reference"))
+    confidence = float(result.get("confidence") or 0.0)
+    explanation = str(result.get("explanation") or "").strip()[:200]
+
+    if (
+        is_reference
+        and _NEGATIVE_REFERENCE_REGEX.search(explanation)
+    ):
+        if confidence >= 0.7:
+            is_reference = False
+        else:
+            logger.warning(
+                "Review inconsistente para citation_id=%s: is_reference=true con explicación negativa y confianza baja=%.3f.",
+                citation_id,
+                confidence,
+            )
+
     return {
         "citation_id": citation_id,
-        "is_reference": bool(result.get("is_reference")),
+        "is_reference": is_reference,
         "norm_type": str(result.get("norm_type") or "OTRO").upper(),
         "normalized_key": normalized_key if normalized_key else None,
-        "confidence": float(result.get("confidence") or 0.0),
-        "explanation": str(result.get("explanation") or "").strip()[:200],
+        "confidence": confidence,
+        "explanation": explanation,
     }
 
 
