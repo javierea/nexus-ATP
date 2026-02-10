@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,14 +36,31 @@ def _utc_now() -> str:
 class NormsRepository:
     """SQLite-backed repository for norms catalog."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        if conn is None and db_path is None:
+            raise ValueError("Se requiere db_path o conn.")
         self._db_path = db_path
+        self._conn = conn
 
-    def _connect(self) -> sqlite3.Connection:
+    def _should_autocommit(self) -> bool:
+        return self._conn is None
+
+    @contextmanager
+    def _connection(self) -> sqlite3.Connection:
+        if self._conn is not None:
+            yield self._conn
+            return
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def upsert_norm(
         self,
@@ -55,7 +73,7 @@ class NormsRepository:
         title: str | None = None,
     ) -> int:
         now = _utc_now()
-        with self._connect() as conn:
+        with self._connection() as conn:
             cur = conn.execute(
                 "SELECT * FROM norms WHERE norm_key = ?",
                 (norm_key,),
@@ -94,7 +112,8 @@ class NormsRepository:
                         norm_key,
                     ),
                 )
-                conn.commit()
+                if self._should_autocommit():
+                    conn.commit()
                 return int(row["norm_id"])
             conn.execute(
                 """
@@ -125,7 +144,8 @@ class NormsRepository:
                     now,
                 ),
             )
-            conn.commit()
+            if self._should_autocommit():
+                conn.commit()
             return int(
                 conn.execute(
                     "SELECT norm_id FROM norms WHERE norm_key = ?",
@@ -135,12 +155,13 @@ class NormsRepository:
 
     def set_norm_status(self, norm_id: int, status: str) -> None:
         now = _utc_now()
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 "UPDATE norms SET status = ?, updated_at = ? WHERE norm_id = ?",
                 (status, now, norm_id),
             )
-            conn.commit()
+            if self._should_autocommit():
+                conn.commit()
 
     def add_alias(
         self,
@@ -152,7 +173,7 @@ class NormsRepository:
         valid_to: str | None = None,
     ) -> None:
         now = _utc_now()
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO norm_aliases (
@@ -181,13 +202,14 @@ class NormsRepository:
                     now,
                 ),
             )
-            conn.commit()
+            if self._should_autocommit():
+                conn.commit()
 
     def resolve_norm_by_alias(
         self, text: str
     ) -> Optional[tuple[int, str, float, str]]:
         normalized = normalize_text(text)
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT n.norm_id, n.norm_key, a.confidence, a.alias_text
@@ -215,7 +237,7 @@ class NormsRepository:
         )
 
     def get_norm(self, norm_key: str) -> NormRecord | None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 "SELECT * FROM norms WHERE norm_key = ?",
                 (norm_key,),
@@ -246,7 +268,7 @@ class NormsRepository:
         notes: str | None,
     ) -> int:
         now = _utc_now()
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 """
                 SELECT source_id
@@ -269,7 +291,8 @@ class NormsRepository:
                     """,
                     (int(is_authoritative), notes, now, int(row["source_id"])),
                 )
-                conn.commit()
+                if self._should_autocommit():
+                    conn.commit()
                 return int(row["source_id"])
             conn.execute(
                 """
@@ -296,7 +319,8 @@ class NormsRepository:
                     now,
                 ),
             )
-            conn.commit()
+            if self._should_autocommit():
+                conn.commit()
             return int(
                 conn.execute(
                     """
@@ -319,7 +343,7 @@ class NormsRepository:
         pdf_path: str,
         file_size_bytes: int,
     ) -> bool:
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 """
                 SELECT version_id
@@ -343,5 +367,6 @@ class NormsRepository:
                 """,
                 (source_id, sha256, downloaded_at, pdf_path, file_size_bytes),
             )
-            conn.commit()
+            if self._should_autocommit():
+                conn.commit()
             return True

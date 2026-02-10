@@ -119,3 +119,68 @@ def test_citations_service_placeholder_fk(tmp_path: Path):
         assert row is not None
         assert row["target_norm_key"] == "LEY-1234-A"
         assert row["norm_key"] == "LEY-1234-A"
+
+
+def test_citations_service_runs_twice_without_lock(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-004"
+    raw_text = "Ley 83-F y Dec. Ley 2444/62."
+    (raw_text_dir / f"{doc_key}.txt").write_text(raw_text, encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    repo = NormsRepository(db_path)
+    norm_id = repo.upsert_norm("LEY-83-F", "LEY")
+    repo.add_alias(norm_id, "Dec. Ley 2444/62", alias_kind="CITATION", confidence=0.9)
+
+    summaries = []
+    for _ in range(2):
+        summaries.append(
+            run_citations(
+                db_path=db_path,
+                data_dir=data_dir,
+                doc_keys=[doc_key],
+                limit_docs=None,
+                llm_mode="off",
+                min_confidence=0.7,
+                create_placeholders=True,
+            )
+        )
+
+    assert summaries[0]["citations_inserted"] >= 1
+
+
+def test_citations_service_streamlit_rerun(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-005"
+    raw_text = "Según Ley 1234-A."
+    (raw_text_dir / f"{doc_key}.txt").write_text(raw_text, encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    first = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="off",
+        min_confidence=0.7,
+        create_placeholders=True,
+    )
+    second = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="off",
+        min_confidence=0.7,
+        create_placeholders=True,
+    )
+
+    assert first["docs_processed"] == 1
+    assert second["docs_processed"] == 1
