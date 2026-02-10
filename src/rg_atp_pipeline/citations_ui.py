@@ -20,6 +20,14 @@ def render_citations_stage(db_path: Path) -> None:
     config = load_config(config_path())
     data_root = data_dir()
 
+    llm_mode = st.radio(
+        "Modo LLM",
+        ["off", "verify"],
+        index=0,
+        horizontal=True,
+        key="citations_llm_mode",
+    )
+
     with st.form("citations_form"):
         st.subheader("Parámetros de ejecución")
         doc_keys_raw = st.text_input(
@@ -38,33 +46,31 @@ def render_citations_stage(db_path: Path) -> None:
             "Crear placeholders en catálogo de normas",
             value=True,
         )
-        llm_mode = st.radio(
-            "Modo LLM",
-            ["off", "verify"],
-            index=0,
-            horizontal=True,
-        )
 
         ollama_base_url = config.ollama_base_url
         ollama_model = config.ollama_model
         batch_size = config.llm_batch_size
 
+        st.markdown("**Overrides Ollama (opcional)**")
+        overrides_disabled = llm_mode != "verify"
+        ollama_base_url = st.text_input(
+            "Base URL Ollama",
+            value=config.ollama_base_url,
+            disabled=overrides_disabled,
+        )
+        ollama_model = st.text_input(
+            "Modelo Ollama",
+            value=config.ollama_model,
+            disabled=overrides_disabled,
+        )
+        batch_size = st.number_input(
+            "Batch size LLM",
+            min_value=1,
+            value=config.llm_batch_size,
+            step=1,
+            disabled=overrides_disabled,
+        )
         if llm_mode == "verify":
-            st.markdown("**Overrides Ollama (opcional)**")
-            ollama_base_url = st.text_input(
-                "Base URL Ollama",
-                value=config.ollama_base_url,
-            )
-            ollama_model = st.text_input(
-                "Modelo Ollama",
-                value=config.ollama_model,
-            )
-            batch_size = st.number_input(
-                "Batch size LLM",
-                min_value=1,
-                value=config.llm_batch_size,
-                step=1,
-            )
             test_ollama = st.form_submit_button("Probar conexión Ollama")
         else:
             test_ollama = False
