@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 
 from rg_atp_pipeline.services import citations_service
-from rg_atp_pipeline.services.citations_service import run_citations
+from rg_atp_pipeline.services.citations_service import _normalize_review, run_citations
 from rg_atp_pipeline.storage.migrations import ensure_schema
 from rg_atp_pipeline.storage.norms_repo import NormsRepository
 
@@ -366,3 +366,78 @@ def test_citations_llm_off_never_creates_rejected(tmp_path: Path):
         ).fetchone()
 
     assert row[0] == 0
+
+
+def test_normalize_review_forces_not_reference_on_high_confidence_negative_explanation():
+    review = _normalize_review(
+        {
+            "candidate_id": "1",
+            "is_reference": True,
+            "norm_type": "LEY",
+            "normalized_key": "LEY-83-F",
+            "confidence": 0.99,
+            "explanation": "Not a reference",
+        }
+    )
+
+    assert review is not None
+    assert review["is_reference"] is False
+
+
+def test_normalize_review_keeps_reference_on_low_confidence_negative_explanation(caplog):
+    with caplog.at_level("WARNING"):
+        review = _normalize_review(
+            {
+                "candidate_id": "1",
+                "is_reference": True,
+                "norm_type": "LEY",
+                "normalized_key": "LEY-83-F",
+                "confidence": 0.2,
+                "explanation": "Not a reference",
+            }
+        )
+
+    assert review is not None
+    assert review["is_reference"] is True
+    assert "Review inconsistente" in caplog.text
+
+
+def test_verify_pipeline_rejects_when_normalized_review_sets_not_reference(
+    monkeypatch,
+    tmp_path: Path,
+):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-010"
+    (raw_text_dir / f"{doc_key}.txt").write_text("Ley 83-F.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    def fake_verify_candidates(*_args, **_kwargs):
+        return [
+            {
+                "candidate_id": "1",
+                "is_reference": True,
+                "norm_type": "LEY",
+                "normalized_key": "LEY-83-F",
+                "confidence": 0.99,
+                "explanation": "Not a reference",
+            }
+        ]
+
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    summary = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="verify",
+        min_confidence=0.7,
+        create_placeholders=False,
+        llm_gate_regex_threshold=1.0,
+    )
+
+    assert summary["rejected_now"] == 1
