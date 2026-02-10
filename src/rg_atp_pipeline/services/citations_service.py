@@ -247,7 +247,6 @@ def run_citations(
                             citation=citation,
                         )
                         raise
-                    rejected += 1
                     continue
 
                 norm_type = decision["norm_type"]
@@ -288,7 +287,6 @@ def run_citations(
                             target_norm_id=target_norm_id,
                         )
                         raise
-                    resolved += 1
                     continue
 
                 if create_placeholders:
@@ -348,7 +346,6 @@ def run_citations(
                             target_norm_id=target_norm_id,
                         )
                         raise
-                    placeholders_created += 1
                 else:
                     try:
                         _insert_link(
@@ -376,10 +373,14 @@ def run_citations(
                             citation=citation,
                         )
                         raise
-                    unresolved += 1
     finally:
+        link_counts = _count_links_by_status(conn, logger)
         conn.close()
         logger.info("Cerrada conexión SQLite: %s", db_path)
+    rejected = link_counts.get("REJECTED", 0)
+    resolved = link_counts.get("RESOLVED", 0)
+    placeholders_created = link_counts.get("PLACEHOLDER_CREATED", 0)
+    unresolved = link_counts.get("UNRESOLVED", 0)
 
     return {
         "docs_processed": len(available_docs),
@@ -402,6 +403,33 @@ def _connect(db_path: Path, logger: logging.Logger) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 30000")
     return conn
+
+
+def _count_links_by_status(
+    conn: sqlite3.Connection,
+    logger: logging.Logger,
+) -> dict[str, int]:
+    rows = conn.execute(
+        """
+        SELECT resolution_status, COUNT(*) AS total
+        FROM citation_links
+        GROUP BY resolution_status
+        """
+    ).fetchall()
+    counts = {row["resolution_status"]: row["total"] for row in rows}
+    logger.info("Conteo de links por estado: %s", counts)
+    unknown_statuses = set(counts) - {
+        "REJECTED",
+        "RESOLVED",
+        "PLACEHOLDER_CREATED",
+        "UNRESOLVED",
+    }
+    if unknown_statuses:
+        logger.warning(
+            "Estados de resolución desconocidos en citation_links: %s",
+            sorted(unknown_statuses),
+        )
+    return counts
 
 
 def _utc_now() -> str:
