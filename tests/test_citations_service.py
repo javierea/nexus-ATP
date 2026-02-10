@@ -368,6 +368,101 @@ def test_citations_llm_off_never_creates_rejected(tmp_path: Path):
     assert row[0] == 0
 
 
+def test_threshold_override_allows_zero(monkeypatch, tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-011"
+    (raw_text_dir / f"{doc_key}.txt").write_text("Ley 83-F.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    calls: dict[str, float | bool] = {"threshold": -1.0, "verify_called": False}
+
+    original_needs_review = citations_service._needs_llm_review  # noqa: SLF001
+
+    def wrapped_needs_llm_review(candidate, threshold):
+        calls["threshold"] = threshold
+        original_needs_review(candidate, threshold)
+        return True
+
+    def fake_verify_candidates(payload, **_kwargs):
+        calls["verify_called"] = True
+        return [
+            {
+                "candidate_id": item["candidate_id"],
+                "is_reference": True,
+                "norm_type": item["norm_type_guess"] or "LEY",
+                "normalized_key": item["norm_key_candidate"] or "LEY-83-F",
+                "confidence": 0.99,
+                "explanation": "reference",
+            }
+            for item in payload
+        ]
+
+    monkeypatch.setattr(citations_service, "_needs_llm_review", wrapped_needs_llm_review)
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    summary = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=10,
+        llm_mode="verify",
+        min_confidence=0.7,
+        create_placeholders=False,
+        llm_gate_regex_threshold=0.0,
+    )
+
+    assert calls["threshold"] == 0.0
+    assert calls["verify_called"] is True
+    assert summary["reviews_inserted_now"] > 0
+
+
+def test_llm_mode_normalization(monkeypatch, tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-012"
+    (raw_text_dir / f"{doc_key}.txt").write_text("Ley 83-F.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    called = {"verify": False}
+
+    def fake_verify_candidates(payload, **_kwargs):
+        called["verify"] = True
+        return [
+            {
+                "candidate_id": item["candidate_id"],
+                "is_reference": True,
+                "norm_type": "LEY",
+                "normalized_key": item["norm_key_candidate"] or "LEY-83-F",
+                "confidence": 0.99,
+                "explanation": "reference",
+            }
+            for item in payload
+        ]
+
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    summary = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=10,
+        llm_mode=" Verify ",
+        min_confidence=0.7,
+        create_placeholders=False,
+        llm_gate_regex_threshold=1.0,
+    )
+
+    assert called["verify"] is True
+    assert summary["reviews_inserted_now"] > 0
+
+
 def test_normalize_review_forces_not_reference_on_high_confidence_negative_explanation():
     review = _normalize_review(
         {
