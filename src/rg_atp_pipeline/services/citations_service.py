@@ -110,6 +110,9 @@ def run_citations(
     llm_gated_count = 0
     llm_skipped_already_reviewed_count = 0
     llm_batches_sent = 0
+    resolved_deterministic_now = 0
+    llm_overruled_by_deterministic_now = 0
+    rejected_by_llm_now = 0
 
     citations: list[CitationPayload] = []
     conn = _connect(db_path, logger)
@@ -271,6 +274,55 @@ def run_citations(
 
             for citation in citations:
                 review = reviews.get(citation.citation_id)
+                target_norm_id, target_norm_key, target_norm_status = _resolve_norm(
+                    repo,
+                    citation.candidate.norm_key_candidate,
+                    citation.candidate.raw_text,
+                )
+                if target_norm_id is not None:
+                    resolved_status = (
+                        "PLACEHOLDER_CREATED"
+                        if target_norm_status == "PLACEHOLDER"
+                        else "RESOLVED"
+                    )
+                    try:
+                        action = _upsert_link(
+                            conn,
+                            citation.citation_id,
+                            target_norm_id,
+                            target_norm_key,
+                            resolved_status,
+                            citation.candidate.regex_confidence,
+                        )
+                        links_inserted_now += int(action == "inserted")
+                        links_updated_now += int(action == "updated")
+                        if action is not None:
+                            resolved_deterministic_now += 1
+                            if review is not None and not review["is_reference"]:
+                                llm_overruled_by_deterministic_now += 1
+                    except sqlite3.IntegrityError as exc:
+                        _log_integrity_error(
+                            logger,
+                            conn,
+                            "citation_links",
+                            exc,
+                            citation=citation,
+                            target_norm_key=target_norm_key,
+                            target_norm_id=target_norm_id,
+                        )
+                        raise
+                    except sqlite3.OperationalError as exc:
+                        _log_operational_error(
+                            logger,
+                            "insert link",
+                            exc,
+                            citation=citation,
+                            target_norm_key=target_norm_key,
+                            target_norm_id=target_norm_id,
+                        )
+                        raise
+                    continue
+
                 decision = _decide_reference(
                     citation,
                     review,
@@ -291,6 +343,7 @@ def run_citations(
                         links_updated_now += int(action == "updated")
                         if action is not None:
                             rejected_now += 1
+                            rejected_by_llm_now += 1
                     except sqlite3.IntegrityError as exc:
                         _log_integrity_error(
                             logger,
@@ -314,11 +367,7 @@ def run_citations(
 
                 norm_type = decision["norm_type"]
                 key = decision["norm_key"]
-                target_norm_id, target_norm_key, target_norm_status = _resolve_norm(
-                    repo,
-                    key,
-                    citation.candidate.raw_text,
-                )
+                target_norm_id, target_norm_key, target_norm_status = _resolve_norm(repo, key, citation.candidate.raw_text)
                 if target_norm_id is not None:
                     resolved_status = (
                         "PLACEHOLDER_CREATED"
@@ -471,6 +520,9 @@ def run_citations(
         "gated_count": llm_gated_count,
         "skipped_already_reviewed_count": llm_skipped_already_reviewed_count,
         "batches_sent": llm_batches_sent,
+        "resolved_deterministic_now": resolved_deterministic_now,
+        "llm_overruled_by_deterministic_now": llm_overruled_by_deterministic_now,
+        "rejected_by_llm_now": rejected_by_llm_now,
     }
 
 
