@@ -3,6 +3,7 @@ from pathlib import Path
 
 from rg_atp_pipeline.services import citations_service
 from rg_atp_pipeline.services.citations_service import _normalize_review, parse_bool, run_citations
+from rg_atp_pipeline.services.seed_common_aliases import seed_common_aliases
 from rg_atp_pipeline.storage.migrations import ensure_schema
 from rg_atp_pipeline.storage.norms_repo import NormsRepository
 
@@ -759,3 +760,119 @@ def test_prompt_version_override_visible(monkeypatch, tmp_path: Path, caplog):
         ).fetchall()
 
     assert [row[0] for row in prompt_versions] == ["citref-v2"]
+
+
+def test_deterministic_alias_resolution_overrides_negative_llm_for_ley_tarifaria(
+    monkeypatch,
+    tmp_path: Path,
+):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-015"
+    (raw_text_dir / f"{doc_key}.txt").write_text("Aplica Ley Tarifaria.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    seed_common_aliases(db_path, Path("data/state/seeds/common_aliases.yml"))
+
+    def fake_verify_candidates(payload, **_kwargs):
+        return [
+            {
+                "candidate_id": item["candidate_id"],
+                "is_reference": False,
+                "norm_type": "OTRO",
+                "normalized_key": None,
+                "confidence": 0.98,
+                "explanation": "not a legal reference",
+            }
+            for item in payload
+        ]
+
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    summary = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="verify_all",
+        min_confidence=0.7,
+        create_placeholders=False,
+    )
+
+    assert summary["llm_overruled_by_deterministic_now"] == 1
+    assert summary["rejected_by_llm_now"] == 0
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT resolution_status, target_norm_key
+            FROM citation_links
+            ORDER BY citation_id
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert row["resolution_status"] == "RESOLVED"
+    assert row["target_norm_key"] == "LEY-TARIFARIA-CHACO"
+
+
+def test_deterministic_alias_resolution_overrides_negative_llm_for_ctp(
+    monkeypatch,
+    tmp_path: Path,
+):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-016"
+    (raw_text_dir / f"{doc_key}.txt").write_text("Se remite al CTP.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    seed_common_aliases(db_path, Path("data/state/seeds/common_aliases.yml"))
+
+    def fake_verify_candidates(payload, **_kwargs):
+        return [
+            {
+                "candidate_id": item["candidate_id"],
+                "is_reference": False,
+                "norm_type": "OTRO",
+                "normalized_key": None,
+                "confidence": 0.97,
+                "explanation": "not a legal reference",
+            }
+            for item in payload
+        ]
+
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    summary = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="verify_all",
+        min_confidence=0.7,
+        create_placeholders=False,
+    )
+
+    assert summary["llm_overruled_by_deterministic_now"] == 1
+    assert summary["rejected_by_llm_now"] == 0
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT resolution_status, target_norm_key
+            FROM citation_links
+            ORDER BY citation_id
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert row["resolution_status"] == "RESOLVED"
+    assert row["target_norm_key"] == "LEY-83-F"
