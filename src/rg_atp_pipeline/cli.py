@@ -24,6 +24,7 @@ from .services.citations_service import (
     run_citations,
 )
 from .services.norm_seed import seed_norms_from_yaml
+from .services.seed_common_aliases import seed_common_aliases
 from .storage.norms_repo import NormsRepository
 from .storage_sqlite import DocumentStore
 from .state import State, load_state
@@ -386,6 +387,34 @@ def seed_norms() -> None:
     except FileNotFoundError:
         typer.secho(
             f"Archivo de seeds no encontrado: {seeds_path}",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
+
+
+@app.command("seed-common-aliases")
+def seed_common_aliases_cmd(
+    seed_path: Path = typer.Option(
+        data_dir() / "state" / "seeds" / "common_aliases.yml",
+        "--seed-path",
+        help="Ruta al YAML de aliases comunes.",
+    ),
+) -> None:
+    """Seed aliases comunes (CTP / Ley Tarifaria) en forma idempotente."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    db_path = data_dir() / "state" / "rg_atp.sqlite"
+    try:
+        summary = seed_common_aliases(db_path=db_path, seed_path=seed_path)
+    except FileNotFoundError:
+        typer.secho(
+            f"Archivo de seeds no encontrado: {seed_path}",
             fg=typer.colors.RED,
         )
         raise typer.Exit(code=1)
