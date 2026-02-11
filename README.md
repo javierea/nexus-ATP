@@ -61,6 +61,7 @@ python -m rg_atp_pipeline structure --include-needs-ocr --no-export-json
 python -m rg_atp_pipeline audit-compendio --pdf-path data/compendio-legislativo-al-31-12-2024.pdf
 python -m rg_atp_pipeline audit-compendio --only-missing-downloads
 python -m rg_atp_pipeline seed-norms
+python -m rg_atp_pipeline seed-common-aliases --seed-path data/state/seeds/common_aliases.yml
 python -m rg_atp_pipeline upload-norm --norm-key LEY-83-F --file path.pdf --authoritative
 python -m rg_atp_pipeline resolve-norm --text "Dec. Ley 2444/62"
 python -m rg_atp_pipeline citations --llm off
@@ -78,6 +79,7 @@ python -m rg_atp_pipeline ui-streamlit --host 127.0.0.1 --port 8501
 - `structure` segmenta el texto crudo en unidades normativas (ARTÍCULO/ANEXO/secciones) y guarda unidades en SQLite, con export JSON opcional en `data/structured/`.
 - `audit-compendio` extrae referencias a RG desde el compendio legislativo, normaliza claves (`RES-AAAA-NN-20-1` u `OLD-N`) y exporta CSV/JSON en `data/audit/` con comparación contra `data/state/rg_atp.sqlite`. También genera `missing_downloads_*.csv` y soporta `--only-missing-downloads` para exportar únicamente ese listado.
 - `seed-norms` carga el catálogo inicial de normas y aliases desde `data/state/seeds/norms.yml`.
+- `seed-common-aliases` carga aliases comunes versionados (CTP / Ley Tarifaria) desde `data/state/seeds/common_aliases.yml`; es idempotente y se puede ejecutar múltiples veces sin duplicar filas.
 - `upload-norm` permite subir manualmente un PDF asociado a una norma, versionándolo por SHA256 en `data/raw_pdfs/` y registrando la fuente.
 - `resolve-norm` resuelve un texto libre contra aliases conocidos y sugiere crear placeholder si no encuentra match.
 - `citations` (Etapa 4) detecta referencias normativas en RGs, verifica opcionalmente con Ollama local y resuelve contra el catálogo `norms` (no clasifica relaciones deroga/modifica).
