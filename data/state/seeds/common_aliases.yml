@@ -1,0 +1,120 @@
+- norm_key: LEY-83-F
+  norm_type: LEY
+  jurisdiction: CHACO
+  title: "Código Tributario Provincial"
+  aliases:
+    - alias_text: "CTP"
+      alias_kind: ABBREVIATION
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "C.T.P."
+      alias_kind: ABBREVIATION
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "CODIGO TRIBUTARIO PROVINCIAL"
+      alias_kind: OFFICIAL_NAME
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "CODIGO TRIBUTARIO DE LA PROVINCIA DEL CHACO"
+      alias_kind: OFFICIAL_NAME
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "DECRETO LEY 2444/62"
+      alias_kind: HISTORICAL_EQUIVALENT
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "DEC. LEY 2444/62"
+      alias_kind: HISTORICAL_EQUIVALENT
+      confidence: 0.95
+      valid_from: null
+      valid_to: null
+    - alias_text: "LEY 83-F"
+      alias_kind: SHORT_FORM
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "LEY N° 83-F"
+      alias_kind: SHORT_FORM
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "COD. TRIB. PROVINCIAL"
+      alias_kind: ABBREVIATION
+      confidence: 0.95
+      valid_from: null
+      valid_to: null
+    - alias_text: "COD TRIB PROVINCIAL"
+      alias_kind: ABBREVIATION
+      confidence: 0.95
+      valid_from: null
+      valid_to: null
+    - alias_text: "COD. TRIB. PROV."
+      alias_kind: ABBREVIATION
+      confidence: 0.9
+      valid_from: null
+      valid_to: null
+    - alias_text: "COD TRIB PROV"
+      alias_kind: ABBREVIATION
+      confidence: 0.9
+      valid_from: null
+      valid_to: null
+    - alias_text: "CODIGO TRIBUTARIO PROVINCIAL (T.V.)"
+      alias_kind: OFFICIAL_NAME
+      confidence: 0.85
+      valid_from: null
+      valid_to: null
+- norm_key: LEY-TARIFARIA-CHACO
+  norm_type: LEY
+  jurisdiction: CHACO
+  title: "Ley Tarifaria Provincial"
+  aliases:
+    - alias_text: "LEY TARIFARIA"
+      alias_kind: OFFICIAL_NAME
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "LEY TARIFARIA PROVINCIAL"
+      alias_kind: OFFICIAL_NAME
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "LEY 299-F"
+      alias_kind: SHORT_FORM
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "LEY N° 299-F"
+      alias_kind: SHORT_FORM
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "LEY TARIFARIA N° 299-F"
+      alias_kind: OFFICIAL_NAME
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "LEY TARIFARIA PROVINCIAL N° 299-F"
+      alias_kind: OFFICIAL_NAME
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "LEY 2071"
+      alias_kind: HISTORICAL_EQUIVALENT
+      confidence: 0.95
+      valid_from: null
+      valid_to: null
+    - alias_text: "LEY DE FACTO 2071"
+      alias_kind: HISTORICAL_EQUIVALENT
+      confidence: 1.0
+      valid_from: null
+      valid_to: null
+    - alias_text: "LEY N° 299-F (ANTES LEY 2071)"
+      alias_kind: HISTORICAL_EQUIVALENT
+      confidence: 0.9
+      valid_from: null
+      valid_to: null
