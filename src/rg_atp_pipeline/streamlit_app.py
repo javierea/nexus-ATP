@@ -35,6 +35,14 @@ from rg_atp_pipeline.audit_compendio import (
     update_audit_summary_with_review,
 )
 from rg_atp_pipeline.citations_ui import render_citations_stage
+from rg_atp_pipeline.citations_ui import (
+    get_citation_filter_options,
+    get_citations_breakdown,
+    get_citations_summary,
+    get_consistency_issues,
+    get_llm_explanations_stats,
+    get_norms_coverage_stats,
+)
 from rg_atp_pipeline.ollama_client import (
     OllamaClient,
     OllamaConfig,
@@ -146,6 +154,7 @@ def run_app() -> None:
     page = st.sidebar.radio(
         "Módulo",
         [
+            "Pipeline Overview",
             "Dashboard",
             "Fetch",
             "Extract",
@@ -158,7 +167,9 @@ def run_app() -> None:
         ],
     )
 
-    if page == "Dashboard":
+    if page == "Pipeline Overview":
+        render_pipeline_overview(db_path)
+    elif page == "Dashboard":
         render_dashboard(db_path)
     elif page == "Fetch":
         render_fetch(db_path, store, logger)
@@ -221,6 +232,171 @@ def render_dashboard(db_path: Path) -> None:
 
     st.subheader("Actividad reciente")
     st.dataframe(maybe_dataframe(cached_activity(str(db_path), 50)))
+
+
+@st.cache_data(ttl=10)
+def cached_citations_summary(db_path_str: str) -> dict[str, Any]:
+    return get_citations_summary(Path(db_path_str))
+
+
+@st.cache_data(ttl=10)
+def cached_citations_breakdown(
+    db_path_str: str,
+    prompt_version: str | None,
+    resolution_status: str | None,
+    norm_type: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return get_citations_breakdown(
+        Path(db_path_str),
+        prompt_version=prompt_version,
+        resolution_status=resolution_status,
+        norm_type=norm_type,
+        limit=limit,
+    )
+
+
+@st.cache_data(ttl=10)
+def cached_llm_explanations(db_path_str: str, prompt_version: str | None) -> list[dict[str, Any]]:
+    return get_llm_explanations_stats(Path(db_path_str), prompt_version=prompt_version)
+
+
+@st.cache_data(ttl=10)
+def cached_citation_filter_options(db_path_str: str) -> dict[str, list[str]]:
+    return get_citation_filter_options(Path(db_path_str))
+
+
+@st.cache_data(ttl=10)
+def cached_norms_coverage(db_path_str: str) -> dict[str, list[dict[str, Any]]]:
+    return get_norms_coverage_stats(Path(db_path_str))
+
+
+@st.cache_data(ttl=10)
+def cached_consistency_issues(db_path_str: str) -> dict[str, Any]:
+    return get_consistency_issues(Path(db_path_str))
+
+
+def render_pipeline_overview(db_path: Path) -> None:
+    st.title("Pipeline Overview")
+    summary = cached_citations_summary(str(db_path))
+
+    docs_col1, docs_col2, docs_col3 = st.columns(3)
+    docs_col1.metric("Total RGs", summary.get("total_rgs", 0))
+    docs_col2.metric("RG con estructura", summary.get("rgs_with_structure", 0))
+    docs_col3.metric("RG listas para RAG", summary.get("rgs_ready_for_rag", 0))
+
+    st.subheader("Citations (Etapa 4)")
+    cit_col1, cit_col2, cit_col3, cit_col4 = st.columns(4)
+    cit_col1.metric("Total citations", summary.get("total_citations", 0))
+    cit_col2.metric("Total reviews", summary.get("total_reviews", 0))
+    cit_col3.metric("Total RESOLVED", summary.get("total_resolved", 0))
+    cit_col4.metric("Total PLACEHOLDER_CREATED", summary.get("total_placeholder_created", 0))
+
+    cit_col5, cit_col6, cit_col7 = st.columns(3)
+    cit_col5.metric("Total REJECTED", summary.get("total_rejected", 0))
+    cit_col6.metric("Último prompt_version", summary.get("last_prompt_version") or "N/A")
+    cit_col7.metric("Último modelo", summary.get("last_model") or "N/A")
+    st.metric("Última fecha de review", summary.get("last_review_at") or "N/A")
+
+    st.caption("Reviews por prompt_version")
+    st.dataframe(maybe_dataframe(summary.get("reviews_by_prompt_version", [])))
+
+    st.subheader("Deterministic vs LLM")
+    latest_run = st.session_state.get("citations_summary", {})
+    det_col1, det_col2, det_col3 = st.columns(3)
+    det_col1.metric(
+        "resolved_deterministic_now",
+        latest_run.get("resolved_deterministic_now", "N/A"),
+    )
+    det_col2.metric(
+        "rejected_by_llm_now",
+        latest_run.get("rejected_by_llm_now", "N/A"),
+    )
+    det_col3.metric(
+        "llm_overruled_by_deterministic_now",
+        latest_run.get("llm_overruled_by_deterministic_now", "N/A"),
+    )
+
+    consistency = cached_consistency_issues(str(db_path))
+    total_inconsistencies = consistency.get("total_inconsistencies", 0)
+    st.metric("Incoherencias", total_inconsistencies)
+    if total_inconsistencies > 0:
+        st.error(f"Se detectaron {total_inconsistencies} incoherencias de consistencia.")
+    else:
+        st.success("Sin incoherencias detectadas.")
+    with st.expander("Detalles de incoherencias (JSON)"):
+        st.json(consistency)
+
+    analysis_tab, coverage_tab = st.tabs(["Citations Analysis", "Norms Coverage"])
+
+    with analysis_tab:
+        filter_options = cached_citation_filter_options(str(db_path))
+        selected_prompt = st.selectbox(
+            "Filtro prompt_version",
+            options=["(todos)", *filter_options.get("prompt_versions", [])],
+            index=0,
+        )
+        selected_status = st.selectbox(
+            "Filtro resolution_status",
+            options=["(todos)", *filter_options.get("resolution_statuses", [])],
+            index=0,
+        )
+        selected_norm_type = st.selectbox(
+            "Filtro norm_type",
+            options=["(todos)", *filter_options.get("norm_types", [])],
+            index=0,
+        )
+        prompt_filter = None if selected_prompt == "(todos)" else selected_prompt
+        status_filter = None if selected_status == "(todos)" else selected_status
+        norm_filter = None if selected_norm_type == "(todos)" else selected_norm_type
+
+        st.caption("Top 20 explicaciones LLM más frecuentes")
+        explanations = cached_llm_explanations(str(db_path), prompt_filter)
+        st.dataframe(maybe_dataframe(explanations))
+
+        rows = cached_citations_breakdown(
+            str(db_path),
+            prompt_filter,
+            status_filter,
+            norm_filter,
+            200,
+        )
+        st.caption("Detalle de citas")
+        st.dataframe(
+            maybe_dataframe(
+                [
+                    {
+                        "citation_id": row.get("citation_id"),
+                        "raw_text": row.get("raw_text"),
+                        "resolution_status": row.get("resolution_status"),
+                        "target_norm_key": row.get("target_norm_key"),
+                        "is_reference": row.get("is_reference"),
+                        "llm_confidence": row.get("llm_confidence"),
+                        "explanation": row.get("explanation"),
+                    }
+                    for row in rows
+                ]
+            )
+        )
+        with st.expander("Detalles JSON"):
+            st.json(rows)
+
+    with coverage_tab:
+        coverage = cached_norms_coverage(str(db_path))
+        st.caption("Normas más citadas (top 20)")
+        st.dataframe(maybe_dataframe(coverage.get("top_cited_norms", [])))
+
+        st.caption("Normas con más placeholders")
+        st.dataframe(maybe_dataframe(coverage.get("norms_with_placeholders", [])))
+
+        st.caption("Alias más utilizados")
+        st.dataframe(maybe_dataframe(coverage.get("most_used_aliases", [])))
+
+        st.caption("Normas citadas pero nunca resueltas")
+        st.dataframe(maybe_dataframe(coverage.get("cited_never_resolved", [])))
+
+        with st.expander("Cobertura (JSON)"):
+            st.json(coverage)
 
 
 

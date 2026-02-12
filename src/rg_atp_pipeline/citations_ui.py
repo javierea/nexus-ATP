@@ -13,6 +13,7 @@ import streamlit as st
 from rg_atp_pipeline.config import load_config
 from rg_atp_pipeline.paths import config_path, data_dir
 from rg_atp_pipeline.services.citations_service import run_citations
+from rg_atp_pipeline.storage.norms_repo import NormsRepository
 
 
 def render_citations_stage(db_path: Path) -> None:
@@ -250,3 +251,301 @@ def _maybe_dataframe(records: list[dict[str, Any]]) -> Any:
         return pd.DataFrame(records)
     except ImportError:
         return records
+
+
+def get_citations_summary(db_path: Path) -> dict[str, Any]:
+    """Return aggregated metrics for Stage 4 and pipeline overview cards."""
+    if not db_path.exists():
+        return {}
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        doc_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total_rgs,
+                SUM(CASE WHEN ds.structure_status = 'STRUCTURED' THEN 1 ELSE 0 END)
+                    AS rgs_with_structure,
+                SUM(
+                    CASE
+                        WHEN ds.structure_status = 'STRUCTURED'
+                             AND COALESCE(d.text_status, 'NONE') = 'EXTRACTED'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS rgs_ready_for_rag
+            FROM documents d
+            LEFT JOIN doc_structure ds ON ds.doc_key = d.doc_key
+            """
+        ).fetchone()
+        citation_row = conn.execute(
+            """
+            WITH latest_review AS (
+                SELECT llm_model, prompt_version, created_at
+                FROM citation_llm_reviews
+                ORDER BY created_at DESC, review_id DESC
+                LIMIT 1
+            )
+            SELECT
+                (SELECT COUNT(*) FROM citations) AS total_citations,
+                (SELECT COUNT(*) FROM citation_llm_reviews) AS total_reviews,
+                (SELECT COUNT(*) FROM citation_links WHERE resolution_status = 'RESOLVED')
+                    AS total_resolved,
+                (
+                    SELECT COUNT(*)
+                    FROM citation_links
+                    WHERE resolution_status = 'PLACEHOLDER_CREATED'
+                ) AS total_placeholder_created,
+                (SELECT COUNT(*) FROM citation_links WHERE resolution_status = 'REJECTED')
+                    AS total_rejected,
+                (SELECT prompt_version FROM latest_review) AS last_prompt_version,
+                (SELECT llm_model FROM latest_review) AS last_model,
+                (SELECT created_at FROM latest_review) AS last_review_at
+            """
+        ).fetchone()
+        versions = conn.execute(
+            """
+            SELECT prompt_version, COUNT(*) AS total_reviews
+            FROM citation_llm_reviews
+            GROUP BY prompt_version
+            ORDER BY total_reviews DESC, prompt_version DESC
+            """
+        ).fetchall()
+
+    return {
+        "total_rgs": (doc_row["total_rgs"] or 0) if doc_row else 0,
+        "rgs_with_structure": (doc_row["rgs_with_structure"] or 0) if doc_row else 0,
+        "rgs_ready_for_rag": (doc_row["rgs_ready_for_rag"] or 0) if doc_row else 0,
+        "total_citations": (citation_row["total_citations"] or 0) if citation_row else 0,
+        "total_reviews": (citation_row["total_reviews"] or 0) if citation_row else 0,
+        "total_resolved": (citation_row["total_resolved"] or 0) if citation_row else 0,
+        "total_placeholder_created": (
+            (citation_row["total_placeholder_created"] or 0) if citation_row else 0
+        ),
+        "total_rejected": (citation_row["total_rejected"] or 0) if citation_row else 0,
+        "last_prompt_version": citation_row["last_prompt_version"] if citation_row else None,
+        "last_model": citation_row["last_model"] if citation_row else None,
+        "last_review_at": citation_row["last_review_at"] if citation_row else None,
+        "reviews_by_prompt_version": [dict(row) for row in versions],
+    }
+
+
+def get_citations_breakdown(
+    db_path: Path,
+    prompt_version: str | None = None,
+    resolution_status: str | None = None,
+    norm_type: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Return filtered citations rows for analysis table."""
+    if not db_path.exists():
+        return []
+    query = """
+        SELECT
+            c.citation_id,
+            c.raw_text,
+            cl.resolution_status,
+            cl.target_norm_key,
+            lr.is_reference,
+            lr.llm_confidence,
+            lr.explanation,
+            lr.prompt_version,
+            lr.norm_type,
+            lr.created_at
+        FROM citations c
+        LEFT JOIN citation_links cl ON cl.citation_id = c.citation_id
+        LEFT JOIN citation_llm_reviews lr ON lr.citation_id = c.citation_id
+    """
+    where: list[str] = []
+    params: list[Any] = []
+    if prompt_version:
+        where.append("lr.prompt_version = ?")
+        params.append(prompt_version)
+    if resolution_status:
+        where.append("cl.resolution_status = ?")
+        params.append(resolution_status)
+    if norm_type:
+        where.append("COALESCE(lr.norm_type, c.norm_type_guess) = ?")
+        params.append(norm_type)
+    if where:
+        query += " WHERE " + " AND ".join(where)
+    query += " ORDER BY COALESCE(lr.created_at, cl.created_at, c.detected_at) DESC LIMIT ?"
+    params.append(limit)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_llm_explanations_stats(
+    db_path: Path,
+    prompt_version: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Return top LLM explanations by frequency."""
+    if not db_path.exists():
+        return []
+    query = """
+        SELECT explanation, COUNT(*) AS total
+        FROM citation_llm_reviews
+    """
+    params: list[Any] = []
+    if prompt_version:
+        query += " WHERE prompt_version = ?"
+        params.append(prompt_version)
+    query += " GROUP BY explanation ORDER BY total DESC, explanation ASC LIMIT ?"
+    params.append(limit)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_citation_filter_options(db_path: Path) -> dict[str, list[str]]:
+    """Return available filter values for citations analysis."""
+    if not db_path.exists():
+        return {"prompt_versions": [], "resolution_statuses": [], "norm_types": []}
+    with sqlite3.connect(db_path) as conn:
+        prompt_versions = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT prompt_version FROM citation_llm_reviews ORDER BY prompt_version DESC"
+            ).fetchall()
+            if row[0]
+        ]
+        statuses = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT resolution_status FROM citation_links ORDER BY resolution_status"
+            ).fetchall()
+            if row[0]
+        ]
+        norm_types = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT DISTINCT norm_type
+                FROM citation_llm_reviews
+                WHERE norm_type IS NOT NULL
+                ORDER BY norm_type
+                """
+            ).fetchall()
+            if row[0]
+        ]
+    return {
+        "prompt_versions": prompt_versions,
+        "resolution_statuses": statuses,
+        "norm_types": norm_types,
+    }
+
+
+def get_norms_coverage_stats(db_path: Path, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
+    """Return aggregated norms coverage data for dashboard tab."""
+    if not db_path.exists():
+        return {
+            "top_cited_norms": [],
+            "norms_with_placeholders": [],
+            "most_used_aliases": [],
+            "cited_never_resolved": [],
+        }
+    repo = NormsRepository(db_path=db_path)
+    with repo._connection() as conn:  # noqa: SLF001 - repository-managed connection reuse.
+        top_cited_norms = conn.execute(
+            """
+            SELECT
+                cl.target_norm_key,
+                COUNT(*) AS total_citations
+            FROM citation_links cl
+            WHERE cl.target_norm_key IS NOT NULL
+            GROUP BY cl.target_norm_key
+            ORDER BY total_citations DESC, cl.target_norm_key ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        norms_with_placeholders = conn.execute(
+            """
+            SELECT
+                cl.target_norm_key,
+                COUNT(*) AS total_placeholders
+            FROM citation_links cl
+            WHERE cl.resolution_status = 'PLACEHOLDER_CREATED'
+              AND cl.target_norm_key IS NOT NULL
+            GROUP BY cl.target_norm_key
+            ORDER BY total_placeholders DESC, cl.target_norm_key ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        most_used_aliases = conn.execute(
+            """
+            SELECT
+                na.alias_text,
+                n.norm_key,
+                COUNT(*) AS uses
+            FROM citation_llm_reviews lr
+            JOIN norms n ON n.norm_key = lr.normalized_key
+            JOIN norm_aliases na ON na.norm_id = n.norm_id
+            GROUP BY na.alias_text, n.norm_key
+            ORDER BY uses DESC, na.alias_text ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        cited_never_resolved = conn.execute(
+            """
+            SELECT
+                COALESCE(cl.target_norm_key, c.norm_key_candidate) AS norm_key,
+                COUNT(*) AS mentions
+            FROM citations c
+            LEFT JOIN citation_links cl ON cl.citation_id = c.citation_id
+            GROUP BY COALESCE(cl.target_norm_key, c.norm_key_candidate)
+            HAVING norm_key IS NOT NULL
+               AND SUM(CASE WHEN cl.resolution_status = 'RESOLVED' THEN 1 ELSE 0 END) = 0
+            ORDER BY mentions DESC, norm_key ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    return {
+        "top_cited_norms": [dict(row) for row in top_cited_norms],
+        "norms_with_placeholders": [dict(row) for row in norms_with_placeholders],
+        "most_used_aliases": [dict(row) for row in most_used_aliases],
+        "cited_never_resolved": [dict(row) for row in cited_never_resolved],
+    }
+
+
+def get_consistency_issues(db_path: Path) -> dict[str, Any]:
+    """Return inconsistencies between LLM flag, explanation and link resolution."""
+    if not db_path.exists():
+        return {"total_inconsistencies": 0, "details": []}
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                c.citation_id,
+                c.raw_text,
+                lr.is_reference,
+                lr.explanation,
+                cl.resolution_status,
+                CASE
+                    WHEN lr.is_reference = 1 AND lower(lr.explanation) LIKE '%no es%'
+                    THEN 'is_reference=1 + explanation contiene "No es"'
+                    WHEN lr.is_reference = 0 AND cl.resolution_status = 'RESOLVED'
+                    THEN 'is_reference=0 + resolution_status=RESOLVED'
+                    ELSE 'other'
+                END AS issue_type
+            FROM citation_llm_reviews lr
+            JOIN citations c ON c.citation_id = lr.citation_id
+            LEFT JOIN citation_links cl ON cl.citation_id = c.citation_id
+            WHERE (lr.is_reference = 1 AND lower(lr.explanation) LIKE '%no es%')
+               OR (lr.is_reference = 0 AND cl.resolution_status = 'RESOLVED')
+            ORDER BY lr.created_at DESC
+            LIMIT 200
+            """
+        ).fetchall()
+    return {
+        "total_inconsistencies": len(rows),
+        "details": [dict(row) for row in rows],
+    }
