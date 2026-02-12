@@ -23,6 +23,7 @@ from .services.citations_service import (
     normalize_rejected_links_semantics,
     run_citations,
 )
+from .services.relations_service import run_relations
 from .services.norm_seed import seed_norms_from_yaml
 from .services.seed_common_aliases import seed_common_aliases
 from .storage.norms_repo import NormsRepository
@@ -371,6 +372,64 @@ def citations_normalize_rejected() -> None:
     init_project()
     summary = normalize_rejected_links_semantics(
         db_path=data_dir() / "state" / "rg_atp.sqlite"
+    )
+    typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
+@app.command("relations")
+def relations(
+    doc_key: list[str] | None = typer.Option(
+        None,
+        "--doc-key",
+        help="Procesar documentos específicos (repetible).",
+    ),
+    limit_docs: int | None = typer.Option(
+        None,
+        "--limit-docs",
+        help="Máximo de documentos a procesar.",
+    ),
+    llm: str = typer.Option("off", "--llm", help="Modo LLM: off | verify."),
+    min_confidence: float = typer.Option(
+        0.6,
+        "--min-confidence",
+        help="Confianza mínima para insertar relaciones.",
+    ),
+    prompt_version: str = typer.Option(
+        "reltype-v1",
+        "--prompt-version",
+        help="Versión del prompt para validación LLM.",
+    ),
+    batch_size: int | None = typer.Option(
+        None,
+        "--batch-size",
+        help="Batch size LLM (override de config).",
+    ),
+    ollama_model: str | None = typer.Option(
+        None,
+        "--ollama-model",
+        help="Modelo Ollama (override de config).",
+    ),
+    ollama_base_url: str | None = typer.Option(
+        None,
+        "--ollama-base-url",
+        help="Base URL Ollama (override de config).",
+    ),
+) -> None:
+    """Type normative relations from extracted citation links (Etapa 4.1)."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    cfg = load_config(config_path())
+    summary = run_relations(
+        db_path=data_dir() / "state" / "rg_atp.sqlite",
+        data_dir=data_dir(),
+        doc_keys=doc_key,
+        limit_docs=limit_docs,
+        llm_mode=llm,
+        min_confidence=min_confidence,
+        prompt_version=prompt_version,
+        batch_size=batch_size or cfg.llm_batch_size,
+        ollama_model=ollama_model,
+        ollama_base_url=ollama_base_url,
     )
     typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
 
