@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,16 @@ from rg_atp_pipeline.norms_ui import (
     resolve_norm_ui,
     seed_catalog,
     upload_norm_pdf_ui,
+)
+from rg_atp_pipeline.relations_ui import (
+    get_relations_inconsistencies,
+    get_relations_qa_samples,
+    get_relations_summary,
+    get_relations_table,
+    list_relation_prompt_versions,
+    list_relation_scopes,
+    list_relation_types,
+    run_relations_ui,
 )
 
 
@@ -114,6 +125,11 @@ def rows_to_csv(rows: list[dict[str, Any]]) -> str:
     return output.getvalue()
 
 
+def parse_doc_keys_input(value: str) -> list[str]:
+    items = [item.strip() for item in re.split(r"[,\s]+", value) if item.strip()]
+    return list(dict.fromkeys(items))
+
+
 def parse_optional_int(value: str) -> int | None:
     value = value.strip()
     if not value:
@@ -155,12 +171,12 @@ def run_app() -> None:
         "Módulo",
         [
             "Pipeline Overview",
-            "Dashboard",
             "Fetch",
             "Extract",
             "Structure",
             "Audit",
             "Etapa 4 — Citas",
+            "Etapa 4.1 — Relaciones",
             "Normas",
             "Config",
             "Logs",
@@ -169,8 +185,6 @@ def run_app() -> None:
 
     if page == "Pipeline Overview":
         render_pipeline_overview(db_path)
-    elif page == "Dashboard":
-        render_dashboard(db_path)
     elif page == "Fetch":
         render_fetch(db_path, store, logger)
     elif page == "Extract":
@@ -181,6 +195,8 @@ def run_app() -> None:
         render_audit(db_path)
     elif page == "Etapa 4 — Citas":
         render_citations_stage(db_path)
+    elif page == "Etapa 4.1 — Relaciones":
+        render_relations_stage(db_path)
     elif page == "Normas":
         render_normas(db_path)
     elif page == "Config":
@@ -276,6 +292,53 @@ def cached_consistency_issues(db_path_str: str) -> dict[str, Any]:
     return get_consistency_issues(Path(db_path_str))
 
 
+@st.cache_data(ttl=10)
+def cached_relations_summary(db_path_str: str, prompt_version: str | None = None) -> dict[str, Any]:
+    return get_relations_summary(Path(db_path_str), prompt_version=prompt_version)
+
+
+@st.cache_data(ttl=10)
+def cached_relations_table(
+    db_path_str: str,
+    prompt_version: str | None,
+    relation_type: str | None,
+    scope: str | None,
+    limit: int,
+):
+    return get_relations_table(
+        Path(db_path_str),
+        prompt_version=prompt_version,
+        relation_type=relation_type,
+        scope=scope,
+        limit=limit,
+    )
+
+
+@st.cache_data(ttl=10)
+def cached_relations_samples(db_path_str: str, relation_type: str, n: int):
+    return get_relations_qa_samples(Path(db_path_str), relation_type=relation_type, n=n)
+
+
+@st.cache_data(ttl=10)
+def cached_relations_inconsistencies(db_path_str: str) -> dict[str, Any]:
+    return get_relations_inconsistencies(Path(db_path_str))
+
+
+@st.cache_data(ttl=10)
+def cached_relation_prompt_versions(db_path_str: str) -> list[str]:
+    return list_relation_prompt_versions(Path(db_path_str))
+
+
+@st.cache_data(ttl=10)
+def cached_relation_types(db_path_str: str) -> list[str]:
+    return list_relation_types(Path(db_path_str))
+
+
+@st.cache_data(ttl=10)
+def cached_relation_scopes(db_path_str: str) -> list[str]:
+    return list_relation_scopes(Path(db_path_str))
+
+
 def render_pipeline_overview(db_path: Path) -> None:
     st.title("Pipeline Overview")
     summary = cached_citations_summary(str(db_path))
@@ -300,6 +363,24 @@ def render_pipeline_overview(db_path: Path) -> None:
 
     st.caption("Reviews por prompt_version")
     st.dataframe(maybe_dataframe(summary.get("reviews_by_prompt_version", [])))
+
+    st.subheader("Relations (Etapa 4.1)")
+    rel_summary = cached_relations_summary(str(db_path))
+    rel_col1, rel_col2, rel_col3, rel_col4 = st.columns(4)
+    rel_col1.metric("Total relations", rel_summary.get("total_relations", 0))
+    rel_col2.metric("Docs covered", rel_summary.get("docs_covered", 0))
+    rel_col3.metric("LLM reviews", rel_summary.get("llm_reviews_count", 0))
+    rel_col4.metric("Última extracción", rel_summary.get("last_created_at") or "N/A")
+
+    rel_top_types = [
+        {"relation_type": relation_type, "count": count}
+        for relation_type, count in list((rel_summary.get("by_type") or {}).items())[:5]
+    ]
+    st.caption("Top relation types")
+    if rel_top_types:
+        st.bar_chart(maybe_dataframe(rel_top_types), x="relation_type", y="count")
+    else:
+        st.info("Sin relaciones registradas.")
 
     st.subheader("Deterministic vs LLM")
     latest_run = st.session_state.get("citations_summary", {})
@@ -397,6 +478,172 @@ def render_pipeline_overview(db_path: Path) -> None:
 
         with st.expander("Cobertura (JSON)"):
             st.json(coverage)
+
+
+
+def render_relations_stage(db_path: Path) -> None:
+    st.title("Etapa 4.1 — Relaciones")
+    config = load_config(config_path())
+    data_root = data_dir()
+
+    run_tab, summary_tab, explore_tab, audit_tab = st.tabs(["Ejecutar 4.1", "Resumen", "Explorar", "Auditoría"])
+
+    with run_tab:
+        with st.form("relations_form"):
+            doc_keys_raw = st.text_input("Doc keys (coma o espacio)")
+            limit_docs_raw = st.text_input("Límite de documentos (opcional)")
+            llm_mode = st.selectbox("Modo LLM", ["off", "verify"], index=0)
+            min_confidence = st.slider("Confianza mínima", 0.5, 0.95, 0.9, 0.01)
+            prompt_version = st.text_input("Prompt version", value="reltype-v1")
+
+            default_batch_size = int(getattr(config, "llm_batch_size", 20) or 20)
+            batch_size = st.number_input(
+                "Batch size",
+                min_value=1,
+                value=default_batch_size,
+                step=1,
+                disabled=llm_mode != "verify",
+            )
+            ollama_model = st.text_input(
+                "Modelo Ollama (opcional)",
+                value=config.ollama_model,
+                disabled=llm_mode != "verify",
+            )
+            ollama_base_url = st.text_input(
+                "Base URL Ollama (opcional)",
+                value=config.ollama_base_url,
+                disabled=llm_mode != "verify",
+            )
+            submitted = st.form_submit_button("Correr Etapa 4.1")
+
+        if submitted:
+            doc_keys = parse_doc_keys_input(doc_keys_raw) or None
+            limit_docs = parse_optional_int(limit_docs_raw)
+            try:
+                with st.spinner("Ejecutando Etapa 4.1..."):
+                    summary = run_relations_ui(
+                        db_path=db_path,
+                        data_dir=data_root,
+                        doc_keys=doc_keys,
+                        limit_docs=limit_docs,
+                        llm_mode=llm_mode,
+                        min_confidence=min_confidence,
+                        prompt_version=prompt_version,
+                        batch_size=int(batch_size),
+                        ollama_model=ollama_model if llm_mode == "verify" else None,
+                        ollama_base_url=ollama_base_url if llm_mode == "verify" else None,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Error al ejecutar Etapa 4.1: {exc}")
+            else:
+                st.session_state["relations_summary"] = summary
+                st.success("Etapa 4.1 completada.")
+                st.json(summary)
+                col1, col2, col3 = st.columns(3)
+                col1.metric("relations_inserted", summary.get("relations_inserted", 0))
+                col2.metric("links_seen", summary.get("links_seen", 0))
+                col3.metric("llm_verified", summary.get("llm_verified", 0))
+                st.cache_data.clear()
+
+    with summary_tab:
+        summary = cached_relations_summary(str(db_path))
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total relations", summary.get("total_relations", 0))
+        col2.metric("Docs covered", summary.get("docs_covered", 0))
+        col3.metric("LLM reviews", summary.get("llm_reviews_count", 0))
+        col4, col5, _ = st.columns(3)
+        col4.metric("Última extracción", summary.get("last_created_at") or "N/A")
+        col5.metric("Último modelo LLM", summary.get("last_llm_model") or "N/A")
+        st.metric("Último prompt", summary.get("last_prompt_version") or "N/A")
+
+        by_type = [
+            {"relation_type": key, "count": value}
+            for key, value in (summary.get("by_type") or {}).items()
+        ]
+        by_scope = [{"scope": key, "count": value} for key, value in (summary.get("by_scope") or {}).items()]
+        st.caption("Distribución por tipo")
+        if by_type:
+            st.bar_chart(maybe_dataframe(by_type), x="relation_type", y="count")
+        else:
+            st.info("No hay datos por tipo.")
+        st.caption("Distribución por alcance")
+        if by_scope:
+            st.bar_chart(maybe_dataframe(by_scope), x="scope", y="count")
+        else:
+            st.info("No hay datos por alcance.")
+
+    with explore_tab:
+        prompt_versions = cached_relation_prompt_versions(str(db_path))
+        relation_types = cached_relation_types(str(db_path))
+        scopes = cached_relation_scopes(str(db_path))
+
+        col1, col2, col3, col4 = st.columns(4)
+        selected_prompt = col1.selectbox("prompt_version", ["Todos", *prompt_versions], index=0)
+        selected_type = col2.selectbox("relation_type", ["Todos", *relation_types], index=0)
+        selected_scope = col3.selectbox("scope", ["Todos", *scopes], index=0)
+        limit_rows = col4.slider("Límite", min_value=100, max_value=2000, value=500, step=100)
+
+        table = cached_relations_table(
+            str(db_path),
+            None if selected_prompt == "Todos" else selected_prompt,
+            None if selected_type == "Todos" else selected_type,
+            None if selected_scope == "Todos" else selected_scope,
+            limit_rows,
+        )
+
+        if hasattr(table, "empty"):
+            has_rows = not table.empty
+        else:
+            has_rows = bool(table)
+
+        if has_rows:
+            if hasattr(table, "copy"):
+                preview = table.copy()
+                preview["evidence_snippet"] = preview["evidence_snippet"].astype(str).str.slice(0, 120)
+                preview["explanation"] = preview["explanation"].astype(str).str.slice(0, 120)
+                st.dataframe(preview, use_container_width=True)
+
+                selected_idx = st.number_input("Fila para detalle", min_value=0, max_value=len(table) - 1, value=0, step=1)
+                detail = table.iloc[int(selected_idx)].to_dict()
+            else:
+                preview = [
+                    {
+                        **row,
+                        "evidence_snippet": str(row.get("evidence_snippet", ""))[:120],
+                        "explanation": str(row.get("explanation", ""))[:120],
+                    }
+                    for row in table
+                ]
+                st.dataframe(preview, use_container_width=True)
+                selected_idx = st.number_input("Fila para detalle", min_value=0, max_value=len(table) - 1, value=0, step=1)
+                detail = table[int(selected_idx)]
+            with st.expander("Detalle de registro"):
+                st.json(detail)
+        else:
+            st.info("Sin resultados con los filtros actuales.")
+
+    with audit_tab:
+        relation_type = st.selectbox(
+            "relation_type para muestreo",
+            ["REPEALS", "MODIFIES", "SUBSTITUTES", "ACCORDING_TO", "UNKNOWN"],
+            index=0,
+        )
+        sample_size = st.slider("Tamaño de muestra", min_value=5, max_value=100, value=30, step=5)
+        if st.button("Muestrear"):
+            samples = cached_relations_samples(str(db_path), relation_type, sample_size)
+            st.dataframe(samples, use_container_width=True)
+
+        inconsistencies = cached_relations_inconsistencies(str(db_path))
+        st.subheader("Inconsistencias")
+        st.json(inconsistencies)
+
+        if inconsistencies.get("count_article_without_detail", 0) > 0:
+            st.warning("Hay relaciones ARTICLE sin scope_detail.")
+        if inconsistencies.get("count_unknown_high_conf", 0) > 0:
+            st.warning("Hay UNKNOWN con alta confianza (>=0.8).")
+        if inconsistencies.get("count_effect_without_target", 0) > 0:
+            st.warning("Hay relaciones sin target_norm_key.")
+
 
 
 
