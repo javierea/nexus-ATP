@@ -66,6 +66,8 @@ python -m rg_atp_pipeline upload-norm --norm-key LEY-83-F --file path.pdf --auth
 python -m rg_atp_pipeline resolve-norm --text "Dec. Ley 2444/62"
 python -m rg_atp_pipeline citations --llm off
 python -m rg_atp_pipeline citations --llm verify --ollama-model qwen2.5:7b-instruct
+python -m rg_atp_pipeline relations --llm off
+python -m rg_atp_pipeline relations --llm verify --prompt-version reltype-v1
 python -m rg_atp_pipeline ui --host 127.0.0.1 --port 8000
 python -m rg_atp_pipeline ui-streamlit --host 127.0.0.1 --port 8501
 ```
@@ -83,6 +85,7 @@ python -m rg_atp_pipeline ui-streamlit --host 127.0.0.1 --port 8501
 - `upload-norm` permite subir manualmente un PDF asociado a una norma, versionándolo por SHA256 en `data/raw_pdfs/` y registrando la fuente.
 - `resolve-norm` resuelve un texto libre contra aliases conocidos y sugiere crear placeholder si no encuentra match.
 - `citations` (Etapa 4) detecta referencias normativas en RGs, verifica opcionalmente con Ollama local y resuelve contra el catálogo `norms` (no clasifica relaciones deroga/modifica).
+- `relations` (Etapa 4.1) tipifica relaciones normativas desde `citations` + `citation_links` ya resueltos (deroga/modifica/sustituye/incorpora/reglamenta/según, etc.), con validación LLM opcional y modo conservador (`UNKNOWN` cuando no es claro).
 - La página Audit de Streamlit incluye una sección opcional para depurar `missing_downloads` con Ollama local y exportar resultados por veredicto.
 - `ui` levanta una interfaz mínima para revisar inventario, ver config/estado y ejecutar fetches manuales o programados.
 - `ui-streamlit` levanta un panel Streamlit con dashboard, acciones de pipeline, módulos de configuración y la página Audit para correr la auditoría del compendio.

@@ -177,4 +177,65 @@ def ensure_schema(db_path: Path) -> None:
             "CREATE INDEX IF NOT EXISTS idx_citation_links_target "
             "ON citation_links(target_norm_id)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS relation_extractions (
+                relation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                citation_id INTEGER NOT NULL,
+                link_id INTEGER,
+                source_doc_key TEXT NOT NULL,
+                target_norm_key TEXT,
+                relation_type TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                scope_detail TEXT,
+                method TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                evidence_snippet TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(
+                    citation_id,
+                    link_id,
+                    relation_type,
+                    scope,
+                    scope_detail,
+                    method
+                ),
+                FOREIGN KEY(citation_id) REFERENCES citations(citation_id),
+                FOREIGN KEY(link_id) REFERENCES citation_links(link_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS relation_llm_reviews (
+                review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                relation_id INTEGER NOT NULL,
+                llm_model TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                scope_detail TEXT,
+                llm_confidence REAL NOT NULL,
+                explanation TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(relation_id, llm_model, prompt_version),
+                FOREIGN KEY(relation_id) REFERENCES relation_extractions(relation_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_relation_extractions_source_doc_key "
+            "ON relation_extractions(source_doc_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_relation_extractions_target_norm_key "
+            "ON relation_extractions(target_norm_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_relation_extractions_relation_type "
+            "ON relation_extractions(relation_type)"
+        )
         conn.commit()
