@@ -130,3 +130,103 @@ def test_get_relations_table_uses_relation_extractions_evidence_snippet(tmp_path
     else:
         evidence = str(table[0]["evidence_snippet"])
     assert "Modifícase" in evidence
+
+
+def test_get_relations_table_prompt_version_keeps_rows_without_review(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_schema(db_path)
+
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, target_norm_key,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                101,
+                101,
+                "RG-2024-101",
+                "LEY-101",
+                "ACCORDING_TO",
+                "OUTGOING",
+                "NORM",
+                None,
+                "REGEX",
+                0.88,
+                "snippet 101",
+                "exp 101",
+                "2025-01-10T00:00:00Z",
+            ),
+        )
+        first_relation_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, target_norm_key,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                102,
+                102,
+                "RG-2024-102",
+                "LEY-102",
+                "ACCORDING_TO",
+                "OUTGOING",
+                "NORM",
+                None,
+                "REGEX",
+                0.85,
+                "snippet 102",
+                "exp 102",
+                "2025-01-11T00:00:00Z",
+            ),
+        )
+        second_relation_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        conn.execute(
+            """
+            INSERT INTO relation_llm_reviews (
+                relation_id, llm_model, prompt_version, relation_type, direction,
+                scope, scope_detail, llm_confidence, explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                first_relation_id,
+                "gpt-test",
+                "reltype-v2",
+                "ACCORDING_TO",
+                "OUTGOING",
+                "NORM",
+                None,
+                0.93,
+                "llm ok",
+                "2025-01-12T00:00:00Z",
+            ),
+        )
+        conn.commit()
+
+    table = get_relations_table(db_path, prompt_version="reltype-v2", relation_type="ACCORDING_TO", limit=10)
+
+    if hasattr(table, "to_dict"):
+        records = table.to_dict("records")
+    else:
+        records = table
+
+    assert len(records) == 2
+
+    rows_by_relation_id = {row["relation_id"]: row for row in records}
+    assert rows_by_relation_id[first_relation_id]["llm_explanation"] == "llm ok"
+    assert rows_by_relation_id[first_relation_id]["prompt_version"] == "reltype-v2"
+    assert rows_by_relation_id[second_relation_id]["llm_explanation"] is None
+    assert rows_by_relation_id[second_relation_id]["llm_confidence"] is None
+    assert rows_by_relation_id[second_relation_id]["llm_model"] is None
+    assert rows_by_relation_id[second_relation_id]["prompt_version"] is None

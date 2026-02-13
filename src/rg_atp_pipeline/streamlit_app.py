@@ -618,6 +618,12 @@ def render_relations_stage(db_path: Path) -> None:
         selected_scope = col3.selectbox("scope", ["Todos", *scopes], index=0)
         limit_rows = col4.slider("Límite", min_value=100, max_value=2000, value=500, step=100)
 
+        if selected_prompt != "Todos":
+            st.caption(
+                "Se muestran todas las relaciones; las columnas LLM corresponden a "
+                "prompt_version seleccionado (si existe review)."
+            )
+
         table = cached_relations_table(
             str(db_path),
             None if selected_prompt == "Todos" else selected_prompt,
