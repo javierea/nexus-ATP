@@ -88,3 +88,45 @@ def test_relations_summary_and_table(tmp_path: Path) -> None:
     else:
         assert len(table) == 2
         assert expected_cols.issubset(set(table[0].keys()))
+
+
+def test_get_relations_table_uses_relation_extractions_evidence_snippet(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_schema(db_path)
+
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, target_norm_key,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                10,
+                10,
+                "RG-2024-777",
+                "LEY-777",
+                "MODIFIES",
+                "OUTGOING",
+                "ARTICLE",
+                "5",
+                "REGEX",
+                0.9,
+                "Modifícase el artículo 5 de la ley vigente",
+                "regex match",
+                "2025-01-03T00:00:00Z",
+            ),
+        )
+        conn.commit()
+
+    table = get_relations_table(db_path, limit=10)
+    if hasattr(table, "iloc"):
+        evidence = str(table.iloc[0]["evidence_snippet"])
+    else:
+        evidence = str(table[0]["evidence_snippet"])
+    assert "Modifícase" in evidence

@@ -543,10 +543,20 @@ def render_relations_stage(db_path: Path) -> None:
                 col1.metric("relations_inserted", summary.get("relations_inserted", 0))
                 col2.metric("links_seen", summary.get("links_seen", 0))
                 col3.metric("llm_verified", summary.get("llm_verified", 0))
+                col4, col5, col6 = st.columns(3)
+                col4.metric("gated_count", summary.get("gated_count", 0))
+                col5.metric("batches_sent", summary.get("batches_sent", 0))
+                col6.metric(
+                    "skipped_already_reviewed_count",
+                    summary.get("skipped_already_reviewed_count", 0),
+                )
+                if summary.get("llm_mode_effective") == "verify" and int(summary.get("gated_count", 0) or 0) == 0:
+                    st.warning("LLM en modo verify sin candidatos gated (gated_count=0).")
                 st.cache_data.clear()
 
     with summary_tab:
         summary = cached_relations_summary(str(db_path))
+        latest_run = st.session_state.get("relations_summary") or {}
         col1, col2, col3 = st.columns(3)
         col1.metric("Total relations", summary.get("total_relations", 0))
         col2.metric("Docs covered", summary.get("docs_covered", 0))
@@ -555,6 +565,16 @@ def render_relations_stage(db_path: Path) -> None:
         col4.metric("Última extracción", summary.get("last_created_at") or "N/A")
         col5.metric("Último modelo LLM", summary.get("last_llm_model") or "N/A")
         st.metric("Último prompt", summary.get("last_prompt_version") or "N/A")
+
+        run_col1, run_col2, run_col3 = st.columns(3)
+        run_col1.metric("gated_count", latest_run.get("gated_count", 0))
+        run_col2.metric("batches_sent", latest_run.get("batches_sent", 0))
+        run_col3.metric(
+            "skipped_already_reviewed_count",
+            latest_run.get("skipped_already_reviewed_count", 0),
+        )
+        if latest_run.get("llm_mode_effective") == "verify" and int(latest_run.get("gated_count", 0) or 0) == 0:
+            st.warning("Última corrida en modo verify sin candidatos gated (gated_count=0).")
 
         by_type = [
             {"relation_type": key, "count": value}

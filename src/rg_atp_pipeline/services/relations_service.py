@@ -51,7 +51,22 @@ def run_relations(
     llm_verified = 0
     unknown_count = 0
     errors: list[str] = []
-    by_type: dict[str, int] = {}
+    total_candidates_detected = 0
+    candidates_inserted_now = 0
+    gated_count = 0
+    skipped_already_reviewed_count = 0
+    batches_sent = 0
+    by_type_detected: dict[str, int] = {}
+    by_type_inserted: dict[str, int] = {}
+
+    logger.info(
+        "Stage 4.1 LLM config: llm_mode=%r threshold/min_confidence=%s batch_size=%s prompt_version=%s model=%s",
+        llm_mode,
+        min_confidence,
+        batch_size,
+        prompt_version,
+        model,
+    )
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -69,14 +84,16 @@ def run_relations(
                 units_cache[doc_key] = _load_structured_units(data_dir, doc_key)
             text = _build_local_text(row, units_cache[doc_key])
             candidates = extract_relation_candidates(text)
+            total_candidates_detected += len(candidates)
             for candidate in candidates:
-                if candidate.confidence < min_confidence:
+                by_type_detected[candidate.relation_type] = by_type_detected.get(candidate.relation_type, 0) + 1
+
+                should_verify = llm_mode == "verify" and 0.6 <= candidate.confidence < min_confidence
+                should_insert = candidate.confidence >= min_confidence or should_verify
+                if not should_insert:
                     continue
+
                 method = "REGEX"
-                should_verify = (
-                    llm_mode == "verify"
-                    and 0.6 <= candidate.confidence < 0.9
-                )
                 if should_verify:
                     method = "MIXED"
                 relation_id, inserted = _insert_relation_extraction(
@@ -87,9 +104,20 @@ def run_relations(
                 )
                 if inserted:
                     relations_inserted += 1
+                    candidates_inserted_now += 1
+                    by_type_inserted[candidate.relation_type] = by_type_inserted.get(candidate.relation_type, 0) + 1
+
                 final_type = candidate.relation_type
                 final_conf = candidate.confidence
                 if should_verify and relation_id is not None:
+                    if _has_relation_review(
+                        conn,
+                        relation_id=relation_id,
+                        llm_model=model,
+                        prompt_version=prompt_version,
+                    ):
+                        skipped_already_reviewed_count += 1
+                        continue
                     pending_llm.append(
                         {
                             "relation_id": relation_id,
@@ -104,13 +132,22 @@ def run_relations(
                             "regex_confidence": candidate.confidence,
                         }
                     )
-                by_type[final_type] = by_type.get(final_type, 0) + 1
                 if final_type == "UNKNOWN" or final_conf < 0.5:
                     unknown_count += 1
+
+        gated_count = len(pending_llm)
+        logger.info(
+            "Stage 4.1 candidates: total_candidates_detected=%s candidates_inserted_now=%s gated_count=%s skipped_already_reviewed_count=%s",
+            total_candidates_detected,
+            candidates_inserted_now,
+            gated_count,
+            skipped_already_reviewed_count,
+        )
 
         if llm_mode == "verify" and pending_llm:
             for start in range(0, len(pending_llm), batch_size):
                 batch = pending_llm[start : start + batch_size]
+                batches_sent += 1
                 payload = [
                     {
                         "candidate_id": item["candidate_id"],
@@ -153,20 +190,33 @@ def run_relations(
                         llm_verified += 1
                     _update_relation_with_review(conn, relation_id, normalized)
 
-        final_counts = conn.execute(
-            "SELECT relation_type, COUNT(*) AS total FROM relation_extractions GROUP BY relation_type"
-        ).fetchall()
-        by_type = {row["relation_type"]: int(row["total"]) for row in final_counts}
-        unknown_count = by_type.get("UNKNOWN", 0)
+        unknown_count = by_type_inserted.get("UNKNOWN", 0)
+        logger.info(
+            "Stage 4.1 LLM: batches_sent=%s llm_verified=%s",
+            batches_sent,
+            llm_verified,
+        )
         conn.commit()
 
     return {
         "docs_processed": docs_processed,
         "links_seen": links_seen,
         "relations_inserted": relations_inserted,
+        "candidates_inserted_now": candidates_inserted_now,
+        "total_candidates_detected": total_candidates_detected,
         "llm_verified": llm_verified,
         "unknown_count": unknown_count,
-        "by_type": by_type,
+        "by_type": by_type_inserted,
+        "by_type_inserted": by_type_inserted,
+        "by_type_detected": by_type_detected,
+        "llm_mode_effective": llm_mode,
+        "threshold_min_confidence": min_confidence,
+        "batch_size": batch_size,
+        "prompt_version": prompt_version,
+        "model": model,
+        "gated_count": gated_count,
+        "skipped_already_reviewed_count": skipped_already_reviewed_count,
+        "batches_sent": batches_sent,
         "errors": errors,
     }
 
@@ -344,6 +394,24 @@ def _insert_relation_review(
         ),
     )
     return bool(cur.rowcount)
+
+
+def _has_relation_review(
+    conn: sqlite3.Connection,
+    relation_id: int,
+    llm_model: str,
+    prompt_version: str,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM relation_llm_reviews
+        WHERE relation_id = ? AND llm_model = ? AND prompt_version = ?
+        LIMIT 1
+        """,
+        (relation_id, llm_model, prompt_version),
+    ).fetchone()
+    return row is not None
 
 
 def _update_relation_with_review(
