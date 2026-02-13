@@ -129,6 +129,10 @@ def get_relations_table(
         "created_at",
         "evidence_snippet",
         "explanation",
+        "llm_explanation",
+        "llm_confidence",
+        "llm_model",
+        "prompt_version",
     ]
 
     if not db_path.exists():
@@ -136,9 +140,8 @@ def get_relations_table(
 
     where_clauses: list[str] = []
     params: list[Any] = []
-    join = ""
+    join = "LEFT JOIN relation_llm_reviews rv ON rv.relation_id = re.relation_id"
     if prompt_version:
-        join = "JOIN relation_llm_reviews rv ON rv.relation_id = re.relation_id"
         where_clauses.append("rv.prompt_version = ?")
         params.append(prompt_version)
     if relation_type:
@@ -164,7 +167,11 @@ def get_relations_table(
             re.method,
             re.created_at,
             re.evidence_snippet,
-            re.explanation
+            re.explanation,
+            rv.explanation AS llm_explanation,
+            rv.llm_confidence,
+            rv.llm_model,
+            rv.prompt_version
         FROM relation_extractions re
         {join}
         {where_sql}
