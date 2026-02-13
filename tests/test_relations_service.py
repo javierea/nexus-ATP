@@ -285,3 +285,161 @@ def test_relations_service_verify_mode_gates_candidates_and_reports_metrics(tmp_
     assert summary["llm_verified"] == 1
     assert summary["by_type_detected"]["MODIFIES"] == 1
     assert summary["by_type_inserted"]["MODIFIES"] == 1
+
+
+def test_relations_service_skips_according_to_without_target_norm_key(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "RG-2024-904",
+                "1",
+                "ARTICLE",
+                "según lo establece el Artículo 16º",
+                "LEY",
+                None,
+                "según lo establece el Artículo 16º",
+                0.8,
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        citation_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO citation_links (
+                citation_id, target_norm_id, target_norm_key, resolution_status,
+                resolution_confidence, created_at
+            ) VALUES (?, NULL, ?, 'PLACEHOLDER_CREATED', ?, ?)
+            """,
+            (citation_id, "", 0.95, "2026-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+
+    def fake_extract(_text):
+        from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+
+        return [
+            RelationCandidate(
+                relation_type="ACCORDING_TO",
+                direction="UNKNOWN",
+                scope="ARTICLE",
+                scope_detail="16",
+                confidence=0.9,
+                evidence_snippet="según lo establece el Artículo 16º",
+                explanation="regex according_to",
+            )
+        ]
+
+    monkeypatch.setattr(
+        "rg_atp_pipeline.services.relations_service.extract_relation_candidates",
+        fake_extract,
+    )
+
+    summary = run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-904"],
+        limit_docs=None,
+        llm_mode="off",
+        min_confidence=0.6,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    assert summary["relations_inserted"] == 0
+    assert summary["skipped_according_to_no_target_now"] == 1
+    assert summary["inserted_according_to_with_target_now"] == 0
+
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM relation_extractions").fetchone()[0]
+    assert count == 0
+
+
+def test_relations_service_inserts_according_to_with_target_norm_key(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "RG-2024-905",
+                "1",
+                "ARTICLE",
+                "según Ley 83-F",
+                "LEY",
+                "LEY-83-F",
+                "según Ley 83-F",
+                0.8,
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        citation_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO citation_links (
+                citation_id, target_norm_id, target_norm_key, resolution_status,
+                resolution_confidence, created_at
+            ) VALUES (?, NULL, ?, 'RESOLVED', ?, ?)
+            """,
+            (citation_id, "LEY-83-F", 0.95, "2026-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+
+    def fake_extract(_text):
+        from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+
+        return [
+            RelationCandidate(
+                relation_type="ACCORDING_TO",
+                direction="SOURCE_TO_TARGET",
+                scope="WHOLE_NORM",
+                scope_detail=None,
+                confidence=0.9,
+                evidence_snippet="según Ley 83-F",
+                explanation="regex according_to",
+            )
+        ]
+
+    monkeypatch.setattr(
+        "rg_atp_pipeline.services.relations_service.extract_relation_candidates",
+        fake_extract,
+    )
+
+    summary = run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-905"],
+        limit_docs=None,
+        llm_mode="off",
+        min_confidence=0.6,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    assert summary["relations_inserted"] == 1
+    assert summary["inserted_according_to_with_target_now"] == 1
+    assert summary["skipped_according_to_no_target_now"] == 0
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT relation_type, target_norm_key FROM relation_extractions"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "ACCORDING_TO"
+    assert row[1] == "LEY-83-F"

@@ -58,6 +58,9 @@ def run_relations(
     batches_sent = 0
     by_type_detected: dict[str, int] = {}
     by_type_inserted: dict[str, int] = {}
+    skipped_according_to_no_target_now = 0
+    inserted_according_to_with_target_now = 0
+    skipped_according_to_no_target_samples: list[dict[str, Any]] = []
 
     logger.info(
         "Stage 4.1 LLM config: llm_mode=%r threshold/min_confidence=%s batch_size=%s prompt_version=%s model=%s",
@@ -93,6 +96,16 @@ def run_relations(
                 if not should_insert:
                     continue
 
+                if not should_verify:
+                    allowed = _should_persist_relation(
+                        relation_type=candidate.relation_type,
+                        target_norm_key=row["target_norm_key"],
+                    )
+                    if not allowed:
+                        skipped_according_to_no_target_now += 1
+                        _append_skipped_sample(skipped_according_to_no_target_samples, row, candidate)
+                        continue
+
                 method = "REGEX"
                 if should_verify:
                     method = "MIXED"
@@ -106,6 +119,11 @@ def run_relations(
                     relations_inserted += 1
                     candidates_inserted_now += 1
                     by_type_inserted[candidate.relation_type] = by_type_inserted.get(candidate.relation_type, 0) + 1
+                    if (
+                        candidate.relation_type == "ACCORDING_TO"
+                        and _has_target_norm_key(row["target_norm_key"])
+                    ):
+                        inserted_according_to_with_target_now += 1
 
                 final_type = candidate.relation_type
                 final_conf = candidate.confidence
@@ -121,7 +139,10 @@ def run_relations(
                     pending_llm.append(
                         {
                             "relation_id": relation_id,
+                            "inserted_now": inserted,
                             "candidate_id": str(relation_id),
+                            "row": row,
+                            "candidate": candidate,
                             "citation_raw_text": row["raw_text"],
                             "evidence_snippet": candidate.evidence_snippet,
                             "unit_text": text,
@@ -188,7 +209,34 @@ def run_relations(
                     )
                     if inserted:
                         llm_verified += 1
+
+                    if not _should_persist_relation(
+                        relation_type=normalized["relation_type"],
+                        target_norm_key=item["target_norm_key"],
+                    ):
+                        if item.get("inserted_now"):
+                            deleted = _delete_relation_extraction(conn, relation_id)
+                            if deleted:
+                                skipped_according_to_no_target_now += 1
+                                _append_skipped_sample(
+                                    skipped_according_to_no_target_samples,
+                                    item["row"],
+                                    item["candidate"],
+                                )
+                                relations_inserted = max(0, relations_inserted - 1)
+                                candidates_inserted_now = max(0, candidates_inserted_now - 1)
+                                prev = item["candidate"].relation_type
+                                if by_type_inserted.get(prev):
+                                    by_type_inserted[prev] -= 1
+                                    if by_type_inserted[prev] <= 0:
+                                        by_type_inserted.pop(prev, None)
+                        continue
+
                     _update_relation_with_review(conn, relation_id, normalized)
+                    if item.get("inserted_now") and normalized["relation_type"] == "ACCORDING_TO" and _has_target_norm_key(
+                        item["target_norm_key"]
+                    ):
+                        inserted_according_to_with_target_now += 1
 
         unknown_count = by_type_inserted.get("UNKNOWN", 0)
         logger.info(
@@ -217,8 +265,42 @@ def run_relations(
         "gated_count": gated_count,
         "skipped_already_reviewed_count": skipped_already_reviewed_count,
         "batches_sent": batches_sent,
+        "skipped_according_to_no_target_now": skipped_according_to_no_target_now,
+        "inserted_according_to_with_target_now": inserted_according_to_with_target_now,
+        "skipped_according_to_no_target_samples": skipped_according_to_no_target_samples,
         "errors": errors,
     }
+
+
+def _should_persist_relation(relation_type: str, target_norm_key: Any) -> bool:
+    if str(relation_type).upper() != "ACCORDING_TO":
+        return True
+    return _has_target_norm_key(target_norm_key)
+
+
+def _has_target_norm_key(target_norm_key: Any) -> bool:
+    return bool(str(target_norm_key or "").strip())
+
+
+def _append_skipped_sample(
+    samples: list[dict[str, Any]],
+    row: sqlite3.Row,
+    candidate: RelationCandidate,
+    max_items: int = 50,
+) -> None:
+    if len(samples) >= max_items:
+        return
+    samples.append(
+        {
+            "citation_id": row["citation_id"],
+            "source_doc_key": row["source_doc_key"],
+            "raw_text": row["raw_text"],
+            "evidence_snippet": candidate.evidence_snippet,
+            "target_norm_key": row["target_norm_key"],
+            "relation_type": candidate.relation_type,
+            "reason": "ACCORDING_TO requires non-empty target_norm_key",
+        }
+    )
 
 
 def _load_citation_links(
