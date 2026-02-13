@@ -140,10 +140,58 @@ def get_relations_table(
 
     where_clauses: list[str] = []
     params: list[Any] = []
-    join = "LEFT JOIN relation_llm_reviews rv ON rv.relation_id = re.relation_id"
     if prompt_version:
-        where_clauses.append("rv.prompt_version = ?")
+        join = """
+            LEFT JOIN (
+                SELECT
+                    relation_id,
+                    explanation,
+                    llm_confidence,
+                    llm_model,
+                    prompt_version
+                FROM (
+                    SELECT
+                        relation_id,
+                        explanation,
+                        llm_confidence,
+                        llm_model,
+                        prompt_version,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY relation_id
+                            ORDER BY created_at DESC, review_id DESC
+                        ) AS rn
+                    FROM relation_llm_reviews
+                    WHERE prompt_version = ?
+                )
+                WHERE rn = 1
+            ) rv ON rv.relation_id = re.relation_id
+        """
         params.append(prompt_version)
+    else:
+        join = """
+            LEFT JOIN (
+                SELECT
+                    relation_id,
+                    explanation,
+                    llm_confidence,
+                    llm_model,
+                    prompt_version
+                FROM (
+                    SELECT
+                        relation_id,
+                        explanation,
+                        llm_confidence,
+                        llm_model,
+                        prompt_version,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY relation_id
+                            ORDER BY created_at DESC, review_id DESC
+                        ) AS rn
+                    FROM relation_llm_reviews
+                )
+                WHERE rn = 1
+            ) rv ON rv.relation_id = re.relation_id
+        """
     if relation_type:
         where_clauses.append("re.relation_type = ?")
         params.append(relation_type)
