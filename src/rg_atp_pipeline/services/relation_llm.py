@@ -46,14 +46,23 @@ def verify_relation_candidates(
 
 
 def _build_prompt(candidates: list[dict[str, Any]], prompt_version: str) -> str:
+    instructions = [
+        "Responde SOLO JSON válido (array).",
+        "No inventar artículos ni números.",
+        "Si no es explícito, scope_detail=null.",
+        "Si no está claro, relation_type=UNKNOWN con baja confidence.",
+    ]
+    if str(prompt_version).strip().lower() == "reltype-v2":
+        instructions.extend(
+            [
+                "Si solo hay referencia interna a artículo/inciso/anexo sin otra norma externa, NO clasificar como ACCORDING_TO.",
+                "No interpretar referencias intra-norma como relación entre normas; usa relation_type=UNKNOWN o confidence baja.",
+            ]
+        )
+
     payload = {
         "version": prompt_version,
-        "instructions": [
-            "Responde SOLO JSON válido (array).",
-            "No inventar artículos ni números.",
-            "Si no es explícito, scope_detail=null.",
-            "Si no está claro, relation_type=UNKNOWN con baja confidence.",
-        ],
+        "instructions": instructions,
         "input": candidates,
         "output_schema": {
             "candidate_id": "string",

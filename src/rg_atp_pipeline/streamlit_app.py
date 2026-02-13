@@ -501,18 +501,15 @@ def render_relations_stage(db_path: Path) -> None:
                 "Batch size",
                 min_value=1,
                 value=default_batch_size,
-                step=1,
-                disabled=llm_mode != "verify",
+                step=1
             )
             ollama_model = st.text_input(
                 "Modelo Ollama (opcional)",
-                value=config.ollama_model,
-                disabled=llm_mode != "verify",
+                value=config.ollama_model
             )
             ollama_base_url = st.text_input(
                 "Base URL Ollama (opcional)",
-                value=config.ollama_base_url,
-                disabled=llm_mode != "verify",
+                value=config.ollama_base_url
             )
             submitted = st.form_submit_button("Correr Etapa 4.1")
 
@@ -550,6 +547,15 @@ def render_relations_stage(db_path: Path) -> None:
                     "skipped_already_reviewed_count",
                     summary.get("skipped_already_reviewed_count", 0),
                 )
+                col7, col8, _ = st.columns(3)
+                col7.metric(
+                    "skipped_according_to_no_target_now",
+                    summary.get("skipped_according_to_no_target_now", 0),
+                )
+                col8.metric(
+                    "inserted_according_to_with_target_now",
+                    summary.get("inserted_according_to_with_target_now", 0),
+                )
                 if summary.get("llm_mode_effective") == "verify" and int(summary.get("gated_count", 0) or 0) == 0:
                     st.warning("LLM en modo verify sin candidatos gated (gated_count=0).")
                 st.cache_data.clear()
@@ -572,6 +578,15 @@ def render_relations_stage(db_path: Path) -> None:
         run_col3.metric(
             "skipped_already_reviewed_count",
             latest_run.get("skipped_already_reviewed_count", 0),
+        )
+        run_col4, run_col5, _ = st.columns(3)
+        run_col4.metric(
+            "skipped_according_to_no_target_now",
+            latest_run.get("skipped_according_to_no_target_now", 0),
+        )
+        run_col5.metric(
+            "inserted_according_to_with_target_now",
+            latest_run.get("inserted_according_to_with_target_now", 0),
         )
         if latest_run.get("llm_mode_effective") == "verify" and int(latest_run.get("gated_count", 0) or 0) == 0:
             st.warning("Última corrida en modo verify sin candidatos gated (gated_count=0).")
@@ -663,6 +678,25 @@ def render_relations_stage(db_path: Path) -> None:
             st.warning("Hay UNKNOWN con alta confianza (>=0.8).")
         if inconsistencies.get("count_effect_without_target", 0) > 0:
             st.warning("Hay relaciones sin target_norm_key.")
+
+        latest_run = st.session_state.get("relations_summary") or {}
+        st.subheader("Descartes ACCORDING_TO sin target")
+        st.metric(
+            "skipped_according_to_no_target_now",
+            latest_run.get("skipped_according_to_no_target_now", 0),
+        )
+        skipped_samples = latest_run.get("skipped_according_to_no_target_samples") or []
+        if skipped_samples:
+            sample_limit = st.slider(
+                "Muestra descartes ACCORDING_TO sin target",
+                min_value=1,
+                max_value=min(50, len(skipped_samples)),
+                value=min(10, len(skipped_samples)),
+                step=1,
+            )
+            st.dataframe(skipped_samples[:sample_limit], use_container_width=True)
+        else:
+            st.caption("No hay descartes ACCORDING_TO sin target en la última corrida.")
 
 
 
