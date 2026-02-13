@@ -60,6 +60,7 @@ def run_relations(
     by_type_inserted: dict[str, int] = {}
     skipped_according_to_no_target_now = 0
     inserted_according_to_with_target_now = 0
+    collisions_merged_now = 0
     skipped_according_to_no_target_samples: list[dict[str, Any]] = []
 
     logger.info(
@@ -232,7 +233,9 @@ def run_relations(
                                         by_type_inserted.pop(prev, None)
                         continue
 
-                    _update_relation_with_review(conn, relation_id, normalized)
+                    merged = _update_relation_with_review(conn, relation_id, normalized)
+                    if merged:
+                        collisions_merged_now += 1
                     if item.get("inserted_now") and normalized["relation_type"] == "ACCORDING_TO" and _has_target_norm_key(
                         item["target_norm_key"]
                     ):
@@ -267,6 +270,7 @@ def run_relations(
         "batches_sent": batches_sent,
         "skipped_according_to_no_target_now": skipped_according_to_no_target_now,
         "inserted_according_to_with_target_now": inserted_according_to_with_target_now,
+        "collisions_merged_now": collisions_merged_now,
         "skipped_according_to_no_target_samples": skipped_according_to_no_target_samples,
         "errors": errors,
     }
@@ -500,24 +504,104 @@ def _update_relation_with_review(
     conn: sqlite3.Connection,
     relation_id: int,
     review: dict[str, Any],
-) -> None:
+) -> bool:
+    source = conn.execute(
+        """
+        SELECT relation_id, citation_id, link_id, method,
+               relation_type, scope, scope_detail
+        FROM relation_extractions
+        WHERE relation_id = ?
+        """,
+        (relation_id,),
+    ).fetchone()
+    if source is None:
+        return False
+
+    existing = conn.execute(
+        """
+        SELECT relation_id, confidence, explanation
+        FROM relation_extractions
+        WHERE citation_id = ?
+          AND link_id = ?
+          AND relation_type = ?
+          AND scope = ?
+          AND COALESCE(scope_detail, '') = COALESCE(?, '')
+          AND method = ?
+          AND relation_id <> ?
+        LIMIT 1
+        """,
+        (
+            source["citation_id"],
+            source["link_id"],
+            review["relation_type"],
+            review["scope"],
+            review["scope_detail"],
+            source["method"],
+            relation_id,
+        ),
+    ).fetchone()
+
+    if existing is None:
+        conn.execute(
+            """
+            UPDATE relation_extractions
+            SET relation_type = ?, direction = ?, scope = ?, scope_detail = ?,
+                confidence = ?, explanation = ?
+            WHERE relation_id = ?
+            """,
+            (
+                review["relation_type"],
+                review["direction"],
+                review["scope"],
+                review["scope_detail"],
+                review["confidence"],
+                review["explanation"],
+                relation_id,
+            ),
+        )
+        return False
+
+    merged_confidence = max(float(existing["confidence"] or 0.0), float(review["confidence"] or 0.0))
+    llm_explanation = str(review.get("explanation") or "").strip()
+    merged_explanation = llm_explanation or str(existing["explanation"] or "")
+
     conn.execute(
         """
         UPDATE relation_extractions
-        SET relation_type = ?, direction = ?, scope = ?, scope_detail = ?,
-            confidence = ?, explanation = ?
+        SET direction = ?, confidence = ?, explanation = ?
         WHERE relation_id = ?
         """,
         (
-            review["relation_type"],
             review["direction"],
-            review["scope"],
-            review["scope_detail"],
-            review["confidence"],
-            review["explanation"],
-            relation_id,
+            merged_confidence,
+            merged_explanation,
+            existing["relation_id"],
         ),
     )
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO relation_llm_reviews (
+            relation_id, llm_model, prompt_version,
+            relation_type, direction, scope, scope_detail,
+            llm_confidence, explanation, created_at
+        )
+        SELECT ?, llm_model, prompt_version,
+               relation_type, direction, scope, scope_detail,
+               llm_confidence, explanation, created_at
+        FROM relation_llm_reviews
+        WHERE relation_id = ?
+        """,
+        (existing["relation_id"], relation_id),
+    )
+    conn.execute("DELETE FROM relation_llm_reviews WHERE relation_id = ?", (relation_id,))
+    deleted = _delete_relation_extraction(conn, relation_id)
+    return deleted
+
+
+def _delete_relation_extraction(conn: sqlite3.Connection, relation_id: int) -> bool:
+    cur = conn.execute("DELETE FROM relation_extractions WHERE relation_id = ?", (relation_id,))
+    return bool(cur.rowcount)
 
 
 def _safe_int(value: Any) -> int:
