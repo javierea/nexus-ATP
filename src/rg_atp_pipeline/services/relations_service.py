@@ -24,6 +24,26 @@ class StructuredUnit:
     text: str
 
 
+def ensure_dict(value: Any) -> dict[str, Any]:
+    """Normalize dynamic payloads to dict, preserving raw content when needed."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if (text.startswith("{") and text.endswith("}")) or (text.startswith("[") and text.endswith("]")):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return {"_raw": value, "_parse_error": True}
+            if isinstance(parsed, dict):
+                return parsed
+            return {"_raw": value, "_parsed": parsed}
+        return {"_raw": value}
+    return {"_raw": str(value)}
+
+
 def run_relations(
     db_path: Path,
     data_dir: Path,
@@ -199,7 +219,7 @@ def run_relations(
                     for item in batch
                 ]
                 try:
-                    results = verify_relation_candidates(
+                    raw_results = verify_relation_candidates(
                         payload,
                         model=model,
                         base_url=base_url,
@@ -210,14 +230,68 @@ def run_relations(
                     errors.append(str(exc))
                     logger.error("Error LLM relations: %s", exc)
                     continue
-                parsed = {_safe_int(item.get("candidate_id")): item for item in results}
+                results = _normalize_llm_batch_response(raw_results)
+                raw_response_preview = _preview_value(raw_results, max_length=4000)
+                has_parse_error_payload = any(
+                    bool(ensure_dict(entry).get("_parse_error")) for entry in results
+                )
+                if not results:
+                    logger.warning("Stage 4.1 empty or unparsable LLM batch response")
+                parsed: dict[int, dict[str, Any]] = {}
+                for raw_item in results:
+                    try:
+                        item = ensure_dict(raw_item)
+                        candidate_id = _safe_int(item.get("candidate_id"))
+                    except AttributeError:
+                        _log_attribute_error(
+                            logger,
+                            doc_key=None,
+                            relation_id=None,
+                            variable_name="results_item",
+                            value=raw_item,
+                        )
+                        continue
+                    if candidate_id < 0:
+                        logger.warning(
+                            "Stage 4.1 invalid candidate_id from LLM payload: type=%s preview=%r",
+                            type(raw_item).__name__,
+                            _preview_value(raw_item),
+                        )
+                        continue
+                    parsed[candidate_id] = item
                 for item in batch:
                     relation_id = item["relation_id"]
                     result = parsed.get(relation_id)
                     if not result:
+                        if has_parse_error_payload:
+                            _insert_relation_review_error(
+                                conn,
+                                relation_id=relation_id,
+                                llm_model=model,
+                                prompt_version=prompt_version,
+                                status="PARSE_ERROR",
+                                raw_response=raw_response_preview,
+                                explanation="Respuesta LLM no parseable para candidate_id.",
+                            )
                         continue
                     normalized = _normalize_llm_result(result)
                     if not normalized:
+                        _insert_relation_review_error(
+                            conn,
+                            relation_id=relation_id,
+                            llm_model=model,
+                            prompt_version=prompt_version,
+                            status="PARSE_ERROR",
+                            raw_response=_preview_value(result, max_length=4000),
+                            explanation="No se pudo normalizar la respuesta LLM.",
+                        )
+                        logger.warning(
+                            "Stage 4.1 PARSE_ERROR normalizing LLM result doc_key=%s relation_id=%s type=%s preview=%r",
+                            item["row"]["source_doc_key"],
+                            relation_id,
+                            type(result).__name__,
+                            _preview_value(result),
+                        )
                         continue
                     inserted = _insert_relation_review(
                         conn,
@@ -460,11 +534,46 @@ def _insert_relation_extraction(
     return (int(existing[0]), False) if existing else (None, False)
 
 
+def _normalize_llm_batch_response(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return [{"_raw": value, "_parse_error": True}]
+        if isinstance(parsed, list):
+            return parsed
+        return [parsed]
+    normalized = ensure_dict(value)
+    items = normalized.get("items")
+    if isinstance(items, list):
+        return items
+    return [value]
+
+
 def _normalize_llm_result(item: dict[str, Any]) -> dict[str, Any] | None:
-    relation_type = str(item.get("relation_type", "UNKNOWN")).upper()
-    direction = str(item.get("direction", "UNKNOWN")).upper()
-    scope = str(item.get("scope", "UNKNOWN")).upper()
-    scope_detail = item.get("scope_detail")
+    item = ensure_dict(item)
+    try:
+        if item.get("_parse_error"):
+            return None
+        relation_type = str(item.get("relation_type", "UNKNOWN")).upper()
+        direction = str(item.get("direction", "UNKNOWN")).upper()
+        scope = str(item.get("scope", "UNKNOWN")).upper()
+        scope_detail = item.get("scope_detail")
+    except AttributeError:
+        logger = logging.getLogger("rg_atp_pipeline.relations")
+        _log_attribute_error(
+            logger,
+            doc_key=None,
+            relation_id=None,
+            variable_name="llm_result_item",
+            value=item,
+        )
+        return None
     if isinstance(scope_detail, str):
         scope_detail = scope_detail.strip() or None
     try:
@@ -483,6 +592,30 @@ def _normalize_llm_result(item: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _preview_value(value: Any, max_length: int = 200) -> str:
+    if isinstance(value, str):
+        return value[:max_length]
+    text = str(value)
+    return text[:max_length]
+
+
+def _log_attribute_error(
+    logger: logging.Logger,
+    doc_key: str | None,
+    relation_id: int | None,
+    variable_name: str,
+    value: Any,
+) -> None:
+    logger.exception(
+        "Stage 4.1 AttributeError doc_key=%s relation_id=%s variable=%s type=%s preview=%r",
+        doc_key,
+        relation_id,
+        variable_name,
+        type(value).__name__,
+        _preview_value(value),
+    )
+
+
 def _insert_relation_review(
     conn: sqlite3.Connection,
     relation_id: int,
@@ -496,8 +629,8 @@ def _insert_relation_review(
         INSERT OR IGNORE INTO relation_llm_reviews (
             relation_id, llm_model, prompt_version,
             relation_type, direction, scope, scope_detail,
-            llm_confidence, explanation, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            llm_confidence, explanation, status, raw_response, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             relation_id,
@@ -509,6 +642,44 @@ def _insert_relation_review(
             review["scope_detail"],
             review["confidence"],
             review["explanation"],
+            "OK",
+            None,
+            now,
+        ),
+    )
+    return bool(cur.rowcount)
+
+
+def _insert_relation_review_error(
+    conn: sqlite3.Connection,
+    relation_id: int,
+    llm_model: str,
+    prompt_version: str,
+    status: str,
+    raw_response: str,
+    explanation: str,
+) -> bool:
+    now = datetime.now(timezone.utc).isoformat()
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO relation_llm_reviews (
+            relation_id, llm_model, prompt_version,
+            relation_type, direction, scope, scope_detail,
+            llm_confidence, explanation, status, raw_response, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            relation_id,
+            llm_model,
+            prompt_version,
+            "UNKNOWN",
+            "UNKNOWN",
+            "UNKNOWN",
+            None,
+            0.0,
+            explanation[:120],
+            status,
+            raw_response,
             now,
         ),
     )
@@ -617,11 +788,11 @@ def _update_relation_with_review(
         INSERT OR IGNORE INTO relation_llm_reviews (
             relation_id, llm_model, prompt_version,
             relation_type, direction, scope, scope_detail,
-            llm_confidence, explanation, created_at
+            llm_confidence, explanation, status, raw_response, created_at
         )
         SELECT ?, llm_model, prompt_version,
                relation_type, direction, scope, scope_detail,
-               llm_confidence, explanation, created_at
+               llm_confidence, explanation, status, raw_response, created_at
         FROM relation_llm_reviews
         WHERE relation_id = ?
         """,

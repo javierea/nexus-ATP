@@ -325,8 +325,11 @@ def ensure_schema(db_path: Path) -> None:
             if conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='relation_llm_reviews'"
             ).fetchone():
+                review_cols = {row[1] for row in conn.execute("PRAGMA table_info(relation_llm_reviews)")}
+                status_expr = "COALESCE(status, 'OK')" if "status" in review_cols else "'OK'"
+                raw_expr = "raw_response" if "raw_response" in review_cols else "NULL"
                 relation_reviews_backup = conn.execute(
-                    """
+                    f"""
                     SELECT
                         relation_id,
                         llm_model,
@@ -337,6 +340,8 @@ def ensure_schema(db_path: Path) -> None:
                         scope_detail,
                         llm_confidence,
                         explanation,
+                        {status_expr} AS status,
+                        {raw_expr} AS raw_response,
                         created_at
                     FROM relation_llm_reviews
                     """
@@ -454,6 +459,14 @@ def ensure_schema(db_path: Path) -> None:
             )
             """
         )
+        relation_review_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(relation_llm_reviews)")
+        }
+        if "status" not in relation_review_columns:
+            conn.execute("ALTER TABLE relation_llm_reviews ADD COLUMN status TEXT NOT NULL DEFAULT 'OK'")
+        if "raw_response" not in relation_review_columns:
+            conn.execute("ALTER TABLE relation_llm_reviews ADD COLUMN raw_response TEXT")
+
         if relation_reviews_backup:
             relation_ids = {
                 row[0] for row in conn.execute("SELECT relation_id FROM relation_extractions")
@@ -474,8 +487,10 @@ def ensure_schema(db_path: Path) -> None:
                         scope_detail,
                         llm_confidence,
                         explanation,
+                        status,
+                        raw_response,
                         created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     relation_reviews_backup,
                 )
