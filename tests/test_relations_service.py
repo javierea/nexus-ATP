@@ -570,3 +570,98 @@ def test_relations_service_merges_llm_update_when_unique_key_collides(tmp_path: 
     assert rows[0][3] == "MIXED"
     assert rows[0][4] == 0.91
     assert rows[0][5] == "LLM corrected"
+
+
+def test_relations_service_handles_unparseable_llm_string_response(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "RG-2024-907",
+                "1",
+                "ARTICLE",
+                "Modifícase la Ley 83-F",
+                "LEY",
+                "LEY-83-F",
+                "Modifícase la Ley 83-F",
+                0.7,
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        citation_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO citation_links (
+                citation_id, target_norm_id, target_norm_key, resolution_status,
+                resolution_confidence, created_at
+            ) VALUES (?, NULL, ?, 'RESOLVED', ?, ?)
+            """,
+            (citation_id, "LEY-83-F", 0.95, "2026-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+
+    def fake_extract(_text):
+        from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+
+        return [
+            RelationCandidate(
+                relation_type="MODIFIES",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="1",
+                confidence=0.7,
+                evidence_snippet="Modifícase la Ley 83-F",
+                explanation="regex candidate",
+            )
+        ]
+
+    def fake_verify(_payload, **_kwargs):
+        return "not-json-response"
+
+    monkeypatch.setattr(
+        "rg_atp_pipeline.services.relations_service.extract_relation_candidates",
+        fake_extract,
+    )
+    monkeypatch.setattr(
+        "rg_atp_pipeline.services.relations_service.verify_relation_candidates",
+        fake_verify,
+    )
+
+    summary = run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-907"],
+        limit_docs=None,
+        llm_mode="verify",
+        min_confidence=0.9,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    assert summary["gated_count"] == 1
+    assert summary["llm_verified"] == 0
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        review = conn.execute(
+            """
+            SELECT status, raw_response, relation_type
+            FROM relation_llm_reviews
+            ORDER BY review_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert review is not None
+    assert review["status"] == "PARSE_ERROR"
+    assert "not-json-response" in (review["raw_response"] or "")
+    assert review["relation_type"] == "UNKNOWN"
