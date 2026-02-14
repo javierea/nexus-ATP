@@ -26,6 +26,7 @@ from .services.citations_service import (
 from .services.relations_service import run_relations
 from .services.norm_seed import seed_norms_from_yaml
 from .services.seed_common_aliases import seed_common_aliases
+from .services.norm_merge import merge_norm
 from .storage.norms_repo import NormsRepository
 from .storage_sqlite import DocumentStore
 from .state import State, load_state
@@ -518,6 +519,28 @@ def upload_norm(
         norm_type=norm_type,
     )
     typer.echo(json.dumps(summary.__dict__, indent=2, ensure_ascii=False))
+
+
+@app.command("merge-norm")
+def merge_norm_cmd(
+    from_norm_key: str = typer.Option(..., "--from", help="Norm key a fusionar (origen)."),
+    to_norm_key: str = typer.Option(..., "--to", help="Norm key canónico (destino)."),
+    apply: bool = typer.Option(
+        False,
+        "--apply/--dry-run",
+        help="Aplicar cambios o ejecutar solo simulación (default dry-run).",
+    ),
+) -> None:
+    """Merge transaccional de referencias entre normas."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    summary = merge_norm(
+        db_path=data_dir() / "state" / "rg_atp.sqlite",
+        from_norm_key=from_norm_key,
+        to_norm_key=to_norm_key,
+        apply=apply,
+    )
+    typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
 @app.command("resolve-norm")
