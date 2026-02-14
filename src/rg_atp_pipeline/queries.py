@@ -411,6 +411,48 @@ def get_units_for_doc(db_path: Path, doc_key: str) -> list[dict[str, Any]]:
         columns = [col[0] for col in cur.description]
     return [dict(zip(columns, row)) for row in rows]
 
+
+def find_unit_for_offset(
+    db_path: Path,
+    doc_key: str,
+    start_char: int,
+    end_char: int,
+) -> int | None:
+    """Find the most specific containing unit for a match offset.
+
+    Preference order:
+    1) ARTICULO units
+    2) smallest containing range (more specific)
+    """
+    if not db_path.exists() or not doc_key.strip() or start_char < 0 or end_char < 0:
+        return None
+
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, unit_type, start_char, end_char
+            FROM units
+            WHERE doc_key = ?
+              AND start_char IS NOT NULL
+              AND end_char IS NOT NULL
+              AND start_char <= ?
+              AND ? < end_char
+            """,
+            (doc_key.strip(), start_char, start_char),
+        ).fetchall()
+    if not rows:
+        return None
+
+    best = sorted(
+        rows,
+        key=lambda row: (
+            0 if str(row[1] or "").upper() == "ARTICULO" else 1,
+            int(row[3]) - int(row[2]),
+            int(row[0]),
+        ),
+    )[0]
+    return int(best[0])
+
 def _build_filters(filters: dict[str, Any]) -> tuple[str, list[Any]]:
     where = []
     params: list[Any] = []

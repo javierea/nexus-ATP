@@ -347,6 +347,21 @@ def citations(
         "--ollama-base-url",
         help="Base URL Ollama (override de config).",
     ),
+    prompt_version: str | None = typer.Option(
+        "citref-v5",
+        "--prompt-version",
+        help="Versión de prompt para reseñas LLM de citas.",
+    ),
+    only_structured: bool = typer.Option(
+        False,
+        "--only-structured",
+        help="Procesar solo docs con text_status=EXTRACTED y structure_status=STRUCTURED.",
+    ),
+    extract_version: str = typer.Option(
+        "citext-v2",
+        "--extract-version",
+        help="Versión de extracción base para citas.",
+    ),
 ) -> None:
     """Extract and resolve normative citations (Etapa 4)."""
     setup_logging(data_dir() / "logs")
@@ -362,6 +377,9 @@ def citations(
         batch_size=batch_size,
         ollama_model=ollama_model,
         ollama_base_url=ollama_base_url,
+        prompt_version=prompt_version,
+        only_structured=only_structured,
+        extract_version=extract_version,
     )
     typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
 
@@ -396,7 +414,7 @@ def relations(
         help="Confianza mínima para insertar relaciones.",
     ),
     prompt_version: str = typer.Option(
-        "reltype-v1",
+        "reltype-v3",
         "--prompt-version",
         help="Versión del prompt para validación LLM.",
     ),
@@ -415,6 +433,16 @@ def relations(
         "--ollama-base-url",
         help="Base URL Ollama (override de config).",
     ),
+    only_structured: bool = typer.Option(
+        False,
+        "--only-structured",
+        help="Procesar solo docs con text_status=EXTRACTED y structure_status=STRUCTURED.",
+    ),
+    extract_version: str = typer.Option(
+        "relext-v2",
+        "--extract-version",
+        help="Versión de extracción base para relaciones.",
+    ),
 ) -> None:
     """Type normative relations from extracted citation links (Etapa 4.1)."""
     setup_logging(data_dir() / "logs")
@@ -431,6 +459,8 @@ def relations(
         batch_size=batch_size or cfg.llm_batch_size,
         ollama_model=ollama_model,
         ollama_base_url=ollama_base_url,
+        only_structured=only_structured,
+        extract_version=extract_version,
     )
     typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
 

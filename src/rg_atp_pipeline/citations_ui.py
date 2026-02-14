@@ -78,6 +78,10 @@ def render_citations_stage(db_path: Path) -> None:
             value=config.llm_prompt_version,
             disabled=overrides_disabled,
         )
+        extract_version = st.text_input(
+            "Extract version",
+            value="citext-v2",
+        )
         llm_gate_regex_threshold = st.slider(
             "Threshold gating regex (LLM)",
             0.0,
@@ -125,6 +129,7 @@ def render_citations_stage(db_path: Path) -> None:
                     ollama_base_url=ollama_base_url if llm_mode in {"verify", "verify_all"} else None,
                     prompt_version=prompt_version,
                     llm_gate_regex_threshold=llm_gate_regex_threshold,
+                    extract_version=extract_version,
                 )
         except Exception as exc:  # noqa: BLE001 - show runtime errors.
             st.error(f"Error al ejecutar Etapa 4: {exc}")
@@ -156,6 +161,7 @@ def render_citations_stage(db_path: Path) -> None:
             db_path,
             int(preview_limit),
             doc_keys,
+            extract_version=extract_version,
         )
         st.caption("Tabla citations (recientes)")
         st.dataframe(_maybe_dataframe(citations_rows))
@@ -184,27 +190,41 @@ def _read_citations_preview(
     db_path: Path,
     limit: int,
     doc_keys: list[str] | None,
+    extract_version: str | None = None,
 ) -> list[dict[str, Any]]:
     if not db_path.exists():
         return []
     query = """
         SELECT
-            citation_id,
-            source_doc_key,
-            source_unit_id,
-            source_unit_type,
-            raw_text,
-            norm_type_guess,
-            norm_key_candidate,
-            regex_confidence,
-            detected_at
-        FROM citations
+            c.citation_id,
+            c.source_doc_key,
+            c.source_unit_id,
+            c.source_unit_type,
+            u.unit_number AS evidence_unit_number,
+            c.evidence_kind,
+            c.extract_version,
+            c.raw_text,
+            c.norm_type_guess,
+            c.norm_key_candidate,
+            c.evidence_text,
+            u.text AS evidence_unit_full_text,
+            c.regex_confidence,
+            c.detected_at
+        FROM citations c
+        LEFT JOIN units u ON u.id = c.evidence_unit_id
     """
     params: list[Any] = []
     if doc_keys:
         placeholders = ", ".join("?" for _ in doc_keys)
-        query += f" WHERE source_doc_key IN ({placeholders})"
+        query += f" WHERE c.source_doc_key IN ({placeholders})"
         params.extend(doc_keys)
+    if extract_version:
+        query += " AND" if " WHERE " in query else " WHERE "
+        query += " c.extract_version = ?"
+        params.append(extract_version)
+    else:
+        query += " AND" if " WHERE " in query else " WHERE "
+        query += " c.extract_version = (SELECT extract_version FROM citations ORDER BY detected_at DESC, citation_id DESC LIMIT 1)"
     query += " ORDER BY detected_at DESC LIMIT ?"
     params.append(limit)
     with sqlite3.connect(db_path) as conn:
