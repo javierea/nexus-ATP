@@ -34,12 +34,24 @@ _NEGATIVE_REFERENCE_REGEX = re.compile(
 
 _TRUE_STRINGS = {"true", "1", "yes", "y", "si", "sí"}
 _FALSE_STRINGS = {"false", "0", "no", "n"}
+EVIDENCE_SNIPPET_RADIUS = 250
 
 
 @dataclass(frozen=True)
 class UnitPayload:
     unit_id: str | None
     unit_type: str | None
+    unit_number: str | None = None
+    text: str = ""
+    start_char: int | None = None
+    end_char: int | None = None
+
+
+@dataclass(frozen=True)
+class UnitMatch:
+    unit_id: int
+    unit_type: str | None
+    unit_number: str | None
     text: str
 
 
@@ -50,6 +62,7 @@ class CitationPayload:
     source_doc_key: str
     source_unit_id: str | None
     source_unit_type: str | None
+    evidence_text: str
 
 
 def run_citations(
@@ -66,6 +79,8 @@ def run_citations(
     prompt_version: str | None = None,
     llm_gate_regex_threshold: float | None = None,
     llm_timeout_sec: int | None = None,
+    only_structured: bool = False,
+    extract_version: str = "citext-v2",
 ) -> dict[str, Any]:
     """Run citation extraction and normalization."""
     ensure_schema(db_path)
@@ -75,7 +90,7 @@ def run_citations(
     batch_size = config.llm_batch_size if batch_size is None else batch_size
     ollama_model = ollama_model or config.ollama_model
     ollama_base_url = ollama_base_url or config.ollama_base_url
-    prompt_version = prompt_version or config.llm_prompt_version
+    prompt_version = prompt_version or "citref-v5"
     llm_gate_regex_threshold = (
         config.llm_gate_regex_threshold
         if llm_gate_regex_threshold is None
@@ -118,6 +133,22 @@ def run_citations(
     conn = _connect(db_path, logger)
     try:
         repo = NormsRepository(conn=conn)
+        if only_structured and not doc_keys:
+            available_docs = [
+                str(row["doc_key"])
+                for row in conn.execute(
+                    """
+                    SELECT d.doc_key
+                    FROM documents d
+                    JOIN doc_structure s ON s.doc_key = d.doc_key
+                    WHERE COALESCE(d.text_status, 'NONE') = 'EXTRACTED'
+                      AND s.structure_status = 'STRUCTURED'
+                    ORDER BY d.doc_key
+                    """
+                ).fetchall()
+            ]
+            if limit_docs is not None:
+                available_docs = available_docs[:limit_docs]
         docs_since_commit = 0
         commit_every = 50
         with conn:
@@ -133,12 +164,31 @@ def run_citations(
                     extracted = extract_candidates(unit.text)
                     candidates_total += len(extracted)
                     for candidate in extracted:
+                        resolved_unit_id, resolved_unit_type, evidence_text, evidence_kind, match_start_in_unit, match_end_in_unit = _resolve_citation_evidence(
+                            conn,
+                            doc_key,
+                            unit,
+                            candidate,
+                        )
+                        effective_unit = UnitPayload(
+                            unit_id=resolved_unit_id,
+                            unit_type=resolved_unit_type or unit.unit_type,
+                            unit_number=unit.unit_number,
+                            text=unit.text,
+                            start_char=unit.start_char,
+                            end_char=unit.end_char,
+                        )
                         try:
                             citation_id, inserted = _get_or_create_citation_id(
                                 conn,
                                 doc_key,
-                                unit,
+                                effective_unit,
                                 candidate,
+                                evidence_text,
+                                evidence_kind,
+                                match_start_in_unit,
+                                match_end_in_unit,
+                                extract_version,
                             )
                         except sqlite3.OperationalError as exc:
                             _log_operational_error(
@@ -149,8 +199,9 @@ def run_citations(
                                     citation_id=-1,
                                     candidate=candidate,
                                     source_doc_key=doc_key,
-                                    source_unit_id=unit.unit_id,
-                                    source_unit_type=unit.unit_type,
+                                    source_unit_id=effective_unit.unit_id,
+                                    source_unit_type=effective_unit.unit_type,
+                                    evidence_text=evidence_text,
                                 ),
                             )
                             raise
@@ -161,8 +212,9 @@ def run_citations(
                                 citation_id=citation_id,
                                 candidate=candidate,
                                 source_doc_key=doc_key,
-                                source_unit_id=unit.unit_id,
-                                source_unit_type=unit.unit_type,
+                                source_unit_id=effective_unit.unit_id,
+                                source_unit_type=effective_unit.unit_type,
+                                evidence_text=evidence_text,
                             )
                         )
                 docs_since_commit += 1
@@ -655,6 +707,8 @@ def _load_units(data_dir: Path, doc_key: str, logger: logging.Logger) -> list[Un
                 unit_id=None,
                 unit_type=None,
                 text=raw_path.read_text(encoding="utf-8"),
+                start_char=0,
+                end_char=None,
             )
         ]
     return []
@@ -670,6 +724,9 @@ def _units_from_structured(payload: dict[str, Any]) -> list[UnitPayload]:
                     unit_id=str(item.get("unit_id") or item.get("id") or ""),
                     unit_type=str(item.get("unit_type") or item.get("type") or ""),
                     text=text,
+                    unit_number=str(item.get("unit_number") or item.get("number") or "") or None,
+                    start_char=item.get("start_char"),
+                    end_char=item.get("end_char"),
                 )
             )
     if units:
@@ -698,11 +755,82 @@ def _units_from_structured(payload: dict[str, Any]) -> list[UnitPayload]:
     return units
 
 
+
+def _resolve_citation_evidence(
+    conn: sqlite3.Connection,
+    doc_key: str,
+    unit: UnitPayload,
+    candidate: Candidate,
+) -> tuple[str | None, str | None, str, str, int | None, int | None]:
+    match_start = candidate.span_start
+    if match_start is not None and unit.start_char is not None:
+        match_start = unit.start_char + match_start
+    unit_row = _find_unit_for_offset(conn, doc_key, match_start)
+    if unit_row is not None:
+        unit_text = str(unit_row["text"] or "")
+        unit_start = int(unit_row["start_char"] or 0)
+        local_start = None if match_start is None else max(0, match_start - unit_start)
+        local_end = None if (local_start is None or candidate.span_end is None or candidate.span_start is None) else max(local_start, local_start + (candidate.span_end - candidate.span_start))
+        snippet = _snippet(unit_text, local_start, local_end, EVIDENCE_SNIPPET_RADIUS)
+        return (
+            str(unit_row["id"]),
+            unit_row["unit_type"],
+            snippet,
+            "UNIT",
+            local_start,
+            local_end,
+        )
+    if unit.unit_id:
+        return unit.unit_id, unit.unit_type, candidate.evidence_snippet, "SNIPPET", None, None
+    return None, unit.unit_type, candidate.evidence_snippet, "SNIPPET", None, None
+
+
+def _snippet(text: str, start: int | None, end: int | None, radius: int) -> str:
+    if not text.strip():
+        return text
+    if start is None or end is None:
+        return text[: min(len(text), radius * 2)].strip()
+    begin = max(0, start - radius)
+    finish = min(len(text), end + radius)
+    return text[begin:finish].strip()
+
+
+def _find_unit_for_offset(
+    conn: sqlite3.Connection,
+    doc_key: str,
+    match_start: int | None,
+) -> sqlite3.Row | None:
+    if match_start is None:
+        return None
+    rows = conn.execute(
+        """
+        SELECT id, unit_type, unit_number, text, start_char, end_char
+        FROM units
+        WHERE doc_key = ?
+          AND start_char IS NOT NULL
+          AND end_char IS NOT NULL
+          AND start_char <= ?
+          AND ? < end_char
+        ORDER BY
+            CASE WHEN UPPER(unit_type) = 'ARTICULO' THEN 0 ELSE 1 END,
+            (end_char - start_char) ASC,
+            id ASC
+        LIMIT 1
+        """,
+        (doc_key, match_start, match_start),
+    ).fetchone()
+    return rows
+
 def _get_or_create_citation_id(
     conn: sqlite3.Connection,
     doc_key: str,
     unit: UnitPayload,
     candidate: Candidate,
+    evidence_text: str,
+    evidence_kind: str,
+    match_start_in_unit: int | None,
+    match_end_in_unit: int | None,
+    extract_version: str,
 ) -> tuple[int, bool]:
     now = _utc_now()
     unit_id = unit.unit_id or ""
@@ -714,6 +842,12 @@ def _get_or_create_citation_id(
         candidate.norm_type_guess,
         candidate.norm_key_candidate,
         candidate.evidence_snippet,
+        int(unit.unit_id) if evidence_kind == "UNIT" and str(unit.unit_id or "").isdigit() else None,
+        evidence_text,
+        evidence_kind,
+        match_start_in_unit,
+        match_end_in_unit,
+        extract_version,
         candidate.regex_confidence,
         now,
     )
@@ -729,15 +863,22 @@ def _get_or_create_citation_id(
                 norm_type_guess,
                 norm_key_candidate,
                 evidence_snippet,
+                evidence_unit_id,
+                evidence_text,
+                evidence_kind,
+                match_start_in_unit,
+                match_end_in_unit,
+                extract_version,
                 regex_confidence,
                 detected_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(
                 source_doc_key,
                 source_unit_id,
                 raw_text,
-                evidence_snippet
+                evidence_snippet,
+                extract_version
             ) DO NOTHING
             RETURNING citation_id
             """,
@@ -758,10 +899,16 @@ def _get_or_create_citation_id(
                 norm_type_guess,
                 norm_key_candidate,
                 evidence_snippet,
+                evidence_unit_id,
+                evidence_text,
+                evidence_kind,
+                match_start_in_unit,
+                match_end_in_unit,
+                extract_version,
                 regex_confidence,
                 detected_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             params,
         )
@@ -774,12 +921,14 @@ def _get_or_create_citation_id(
           AND COALESCE(source_unit_id, '') = COALESCE(?, '')
           AND raw_text = ?
           AND evidence_snippet = ?
+          AND extract_version = ?
         """,
         (
             doc_key,
             unit_id,
             candidate.raw_text,
             candidate.evidence_snippet,
+            extract_version,
         ),
     ).fetchone()
     if row is None:
@@ -802,10 +951,15 @@ def _candidate_payload(citation: CitationPayload) -> dict[str, Any]:
         "candidate_id": str(citation.citation_id),
         "raw_text": citation.candidate.raw_text,
         "evidence_snippet": citation.candidate.evidence_snippet,
+        "evidence_text": _get_citation_evidence_text(citation),
         "norm_type_guess": citation.candidate.norm_type_guess,
         "norm_key_candidate": citation.candidate.norm_key_candidate,
     }
 
+
+
+def _get_citation_evidence_text(citation: CitationPayload) -> str:
+    return citation.evidence_text or citation.candidate.evidence_snippet
 
 def _normalize_review(result: dict[str, Any]) -> dict[str, Any] | None:
     candidate_id = result.get("candidate_id")

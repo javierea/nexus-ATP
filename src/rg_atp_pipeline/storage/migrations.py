@@ -83,6 +83,36 @@ def ensure_schema(db_path: Path) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS doc_structure (
+                doc_key TEXT PRIMARY KEY,
+                structure_status TEXT NOT NULL,
+                structure_confidence REAL,
+                articles_detected INTEGER,
+                annexes_detected INTEGER,
+                notes TEXT,
+                structured_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS units (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_key TEXT NOT NULL,
+                unit_type TEXT NOT NULL,
+                unit_number TEXT,
+                title TEXT,
+                text TEXT NOT NULL,
+                start_char INTEGER,
+                end_char INTEGER,
+                start_line INTEGER,
+                end_line INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS citations (
                 citation_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_doc_key TEXT NOT NULL,
@@ -92,15 +122,93 @@ def ensure_schema(db_path: Path) -> None:
                 norm_type_guess TEXT NOT NULL,
                 norm_key_candidate TEXT,
                 evidence_snippet TEXT NOT NULL,
+                extract_version TEXT NOT NULL DEFAULT 'citext-v2',
                 regex_confidence REAL NOT NULL,
                 detected_at TEXT NOT NULL,
                 UNIQUE(
                     source_doc_key,
                     source_unit_id,
                     raw_text,
-                    evidence_snippet
+                    evidence_snippet,
+                    extract_version
                 )
             )
+            """
+        )
+        citation_columns = {row[1] for row in conn.execute("PRAGMA table_info(citations)")}
+        if "extract_version" not in citation_columns:
+            conn.execute("ALTER TABLE citations RENAME TO citations_old")
+            conn.execute(
+                """
+                CREATE TABLE citations (
+                    citation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_doc_key TEXT NOT NULL,
+                    source_unit_id TEXT,
+                    source_unit_type TEXT,
+                    raw_text TEXT NOT NULL,
+                    norm_type_guess TEXT NOT NULL,
+                    norm_key_candidate TEXT,
+                    evidence_snippet TEXT NOT NULL,
+                    extract_version TEXT NOT NULL DEFAULT 'citext-v2',
+                    regex_confidence REAL NOT NULL,
+                    detected_at TEXT NOT NULL,
+                    evidence_unit_id INTEGER,
+                    evidence_text TEXT,
+                    evidence_kind TEXT,
+                    match_start_in_unit INTEGER,
+                    match_end_in_unit INTEGER,
+                    UNIQUE(
+                        source_doc_key,
+                        source_unit_id,
+                        raw_text,
+                        evidence_snippet,
+                        extract_version
+                    )
+                )
+                """
+            )
+            old_columns = {row[1] for row in conn.execute("PRAGMA table_info(citations_old)")}
+            selectable = [
+                "citation_id",
+                "source_doc_key",
+                "source_unit_id",
+                "source_unit_type",
+                "raw_text",
+                "norm_type_guess",
+                "norm_key_candidate",
+                "evidence_snippet",
+                "regex_confidence",
+                "detected_at",
+            ]
+            for optional in ["evidence_unit_id", "evidence_text", "evidence_kind"]:
+                if optional in old_columns:
+                    selectable.append(optional)
+            select_sql = ", ".join(selectable)
+            insert_sql = ", ".join(selectable + ["extract_version"])
+            conn.execute(
+                f"""
+                INSERT INTO citations ({insert_sql})
+                SELECT {select_sql}, 'citext-v1'
+                FROM citations_old
+                """
+            )
+            conn.execute("DROP TABLE citations_old")
+            citation_columns = {row[1] for row in conn.execute("PRAGMA table_info(citations)")}
+        if "evidence_unit_id" not in citation_columns:
+            conn.execute("ALTER TABLE citations ADD COLUMN evidence_unit_id INTEGER")
+        if "evidence_text" not in citation_columns:
+            conn.execute("ALTER TABLE citations ADD COLUMN evidence_text TEXT")
+        if "evidence_kind" not in citation_columns:
+            conn.execute("ALTER TABLE citations ADD COLUMN evidence_kind TEXT")
+        if "match_start_in_unit" not in citation_columns:
+            conn.execute("ALTER TABLE citations ADD COLUMN match_start_in_unit INTEGER")
+        if "match_end_in_unit" not in citation_columns:
+            conn.execute("ALTER TABLE citations ADD COLUMN match_end_in_unit INTEGER")
+        conn.execute(
+            """
+            UPDATE citations
+            SET evidence_kind = COALESCE(evidence_kind, 'SNIPPET'),
+                evidence_text = COALESCE(evidence_text, evidence_snippet)
             """
         )
         conn.execute(
@@ -185,6 +293,7 @@ def ensure_schema(db_path: Path) -> None:
                 link_id INTEGER,
                 source_doc_key TEXT NOT NULL,
                 target_norm_key TEXT,
+                extract_version TEXT NOT NULL DEFAULT 'relext-v2',
                 relation_type TEXT NOT NULL,
                 direction TEXT NOT NULL,
                 scope TEXT NOT NULL,
@@ -200,10 +309,107 @@ def ensure_schema(db_path: Path) -> None:
                     relation_type,
                     scope,
                     scope_detail,
-                    method
+                    method,
+                    extract_version
                 ),
                 FOREIGN KEY(citation_id) REFERENCES citations(citation_id),
                 FOREIGN KEY(link_id) REFERENCES citation_links(link_id)
+            )
+            """
+        )
+        relation_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(relation_extractions)")
+        }
+        if "extract_version" not in relation_columns:
+            conn.execute("ALTER TABLE relation_extractions RENAME TO relation_extractions_old")
+            conn.execute(
+                """
+                CREATE TABLE relation_extractions (
+                    relation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    citation_id INTEGER NOT NULL,
+                    link_id INTEGER,
+                    source_doc_key TEXT NOT NULL,
+                    target_norm_key TEXT,
+                    extract_version TEXT NOT NULL DEFAULT 'relext-v2',
+                    relation_type TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    scope_detail TEXT,
+                    method TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    evidence_snippet TEXT NOT NULL,
+                    explanation TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    source_unit_id INTEGER,
+                    source_unit_number TEXT,
+                    source_unit_text TEXT,
+                    extracted_match_snippet TEXT,
+                    UNIQUE(
+                        citation_id,
+                        link_id,
+                        relation_type,
+                        scope,
+                        scope_detail,
+                        method,
+                        extract_version
+                    ),
+                    FOREIGN KEY(citation_id) REFERENCES citations(citation_id),
+                    FOREIGN KEY(link_id) REFERENCES citation_links(link_id)
+                )
+                """
+            )
+            old_rel_cols = {row[1] for row in conn.execute("PRAGMA table_info(relation_extractions_old)")}
+            base = [
+                "relation_id","citation_id","link_id","source_doc_key","target_norm_key",
+                "relation_type","direction","scope","scope_detail","method","confidence",
+                "evidence_snippet","explanation","created_at"
+            ]
+            for optional in ["source_unit_id", "source_unit_number", "source_unit_text", "extracted_match_snippet"]:
+                if optional in old_rel_cols:
+                    base.append(optional)
+            select_base = [f"old.{column}" for column in base]
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO relation_extractions ({', '.join(base + ['extract_version'])})
+                SELECT {', '.join(select_base)}, 'relext-v1'
+                FROM relation_extractions_old AS old
+                JOIN citations c ON c.citation_id = old.citation_id
+                LEFT JOIN citation_links l ON l.link_id = old.link_id
+                WHERE old.link_id IS NULL OR l.link_id IS NOT NULL
+                """
+            )
+            conn.execute("DROP TABLE relation_extractions_old")
+            relation_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(relation_extractions)")
+            }
+        if "source_unit_id" not in relation_columns:
+            conn.execute("ALTER TABLE relation_extractions ADD COLUMN source_unit_id INTEGER")
+        if "source_unit_number" not in relation_columns:
+            conn.execute("ALTER TABLE relation_extractions ADD COLUMN source_unit_number TEXT")
+        if "source_unit_text" not in relation_columns:
+            conn.execute("ALTER TABLE relation_extractions ADD COLUMN source_unit_text TEXT")
+        if "extracted_match_snippet" not in relation_columns:
+            conn.execute(
+                "ALTER TABLE relation_extractions ADD COLUMN extracted_match_snippet TEXT"
+            )
+        conn.execute(
+            """
+            UPDATE relation_extractions
+            SET extracted_match_snippet = COALESCE(extracted_match_snippet, evidence_snippet)
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_relation_extractions_unit_target_type
+            ON relation_extractions(
+                source_doc_key,
+                source_unit_id,
+                COALESCE(target_norm_key, ''),
+                relation_type,
+                scope,
+                COALESCE(scope_detail, ''),
+                method,
+                extract_version
             )
             """
         )
