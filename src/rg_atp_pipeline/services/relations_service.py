@@ -35,6 +35,8 @@ def run_relations(
     batch_size: int,
     ollama_model: str | None = None,
     ollama_base_url: str | None = None,
+    only_structured: bool = False,
+    extract_version: str = "relext-v2",
 ) -> dict[str, Any]:
     """Run relation typing from existing citations and links."""
     ensure_schema(db_path)
@@ -76,6 +78,20 @@ def run_relations(
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
 
+        if only_structured and not doc_keys:
+            doc_keys = [
+                str(r["doc_key"])
+                for r in conn.execute(
+                    """
+                    SELECT d.doc_key
+                    FROM documents d
+                    JOIN doc_structure s ON s.doc_key = d.doc_key
+                    WHERE COALESCE(d.text_status, 'NONE') = 'EXTRACTED'
+                      AND s.structure_status = 'STRUCTURED'
+                    ORDER BY d.doc_key
+                    """
+                ).fetchall()
+            ]
         rows = _load_citation_links(conn, doc_keys=doc_keys, limit_docs=limit_docs)
         docs_processed = len({row["source_doc_key"] for row in rows})
         pending_llm: list[dict[str, Any]] = []
@@ -115,6 +131,7 @@ def run_relations(
                     row,
                     candidate,
                     method=method,
+                    extract_version=extract_version,
                 )
                 if inserted:
                     relations_inserted += 1
@@ -147,6 +164,7 @@ def run_relations(
                             "citation_raw_text": row["raw_text"],
                             "evidence_snippet": candidate.evidence_snippet,
                             "unit_text": text,
+                            "source_unit_number": row["source_unit_number"],
                             "target_norm_key": row["target_norm_key"],
                             "regex_relation_type": candidate.relation_type,
                             "regex_scope": candidate.scope,
@@ -319,8 +337,11 @@ def _load_citation_links(
         params.extend(doc_keys)
     query = (
         "SELECT c.citation_id, c.source_doc_key, c.source_unit_id, c.raw_text, "
-        "c.evidence_snippet, l.link_id, l.target_norm_key, l.resolution_status "
+        "c.evidence_snippet, c.evidence_text, c.evidence_kind, "
+        "u.unit_number AS source_unit_number, u.text AS source_unit_text, "
+        "l.link_id, l.target_norm_key, l.resolution_status "
         "FROM citations c JOIN citation_links l ON l.citation_id = c.citation_id "
+        "LEFT JOIN units u ON u.id = CAST(c.source_unit_id AS INTEGER) "
         f"WHERE {' AND '.join(where)} ORDER BY c.source_doc_key, c.citation_id"
     )
     rows = conn.execute(query, params).fetchall()
@@ -342,11 +363,14 @@ def _build_local_text(
     structured_units: dict[str, StructuredUnit],
 ) -> str:
     source_unit_id = str(row["source_unit_id"] or "").strip()
+    source_unit_text = str(row["source_unit_text"] or "").strip()
+    if source_unit_text:
+        return source_unit_text
     if source_unit_id and source_unit_id in structured_units:
         text = structured_units[source_unit_id].text.strip()
         if text:
             return text
-    parts = [row["raw_text"] or "", row["evidence_snippet"] or ""]
+    parts = [row["evidence_text"] or "", row["raw_text"] or "", row["evidence_snippet"] or ""]
     return "\n".join(part for part in parts if part).strip()
 
 
@@ -378,20 +402,24 @@ def _insert_relation_extraction(
     row: sqlite3.Row,
     candidate: RelationCandidate,
     method: str,
+    extract_version: str,
 ) -> tuple[int | None, bool]:
     now = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
         """
         INSERT OR IGNORE INTO relation_extractions (
-            citation_id, link_id, source_doc_key, target_norm_key,
+            citation_id, link_id, source_doc_key, source_unit_id, source_unit_number, source_unit_text, target_norm_key,
             relation_type, direction, scope, scope_detail,
-            method, confidence, evidence_snippet, explanation, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            method, confidence, evidence_snippet, extracted_match_snippet, explanation, created_at, extract_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row["citation_id"],
             row["link_id"],
             row["source_doc_key"],
+            _safe_int(row["source_unit_id"]),
+            row["source_unit_number"],
+            row["source_unit_text"],
             row["target_norm_key"],
             candidate.relation_type,
             candidate.direction,
@@ -400,8 +428,10 @@ def _insert_relation_extraction(
             method,
             candidate.confidence,
             candidate.evidence_snippet,
+            candidate.evidence_snippet,
             candidate.explanation[:150],
             now,
+            extract_version,
         ),
     )
     if cur.rowcount:
@@ -411,17 +441,20 @@ def _insert_relation_extraction(
         """
         SELECT relation_id
         FROM relation_extractions
-        WHERE citation_id = ? AND link_id = ? AND relation_type = ?
+        WHERE citation_id = ? AND link_id = ? AND source_unit_id = ? AND relation_type = ?
           AND scope = ? AND COALESCE(scope_detail, '') = COALESCE(?, '')
           AND method = ?
+          AND extract_version = ?
         """,
         (
             row["citation_id"],
             row["link_id"],
+            _safe_int(row["source_unit_id"]),
             candidate.relation_type,
             candidate.scope,
             candidate.scope_detail,
             method,
+            extract_version,
         ),
     ).fetchone()
     return (int(existing[0]), False) if existing else (None, False)

@@ -20,6 +20,8 @@ def run_relations_ui(
     batch_size: int | None,
     ollama_model: str | None,
     ollama_base_url: str | None,
+    only_structured: bool = False,
+    extract_version: str = "relext-v2",
 ) -> dict[str, Any]:
     """Execute Stage 4.1 relation extraction and return summary payload."""
     effective_batch_size = int(batch_size) if batch_size is not None else 20
@@ -34,6 +36,8 @@ def run_relations_ui(
         batch_size=effective_batch_size,
         ollama_model=ollama_model,
         ollama_base_url=ollama_base_url,
+        only_structured=only_structured,
+        extract_version=extract_version,
     )
 
 
@@ -108,6 +112,7 @@ def get_relations_table(
     prompt_version: str | None = None,
     relation_type: str | None = None,
     scope: str | None = None,
+    extract_version: str | None = None,
     limit: int = 500,
 ):
     """Return relation rows for exploration in a dataframe."""
@@ -119,6 +124,9 @@ def get_relations_table(
     empty_columns = [
         "relation_id",
         "source_doc_key",
+        "source_unit_number",
+        "source_unit_id",
+        "source_unit_text",
         "target_norm_key",
         "relation_type",
         "direction",
@@ -133,6 +141,7 @@ def get_relations_table(
         "llm_confidence",
         "llm_model",
         "prompt_version",
+        "extract_version",
     ]
 
     if not db_path.exists():
@@ -198,6 +207,13 @@ def get_relations_table(
     if scope:
         where_clauses.append("re.scope = ?")
         params.append(scope)
+    if extract_version:
+        where_clauses.append("re.extract_version = ?")
+        params.append(extract_version)
+    else:
+        where_clauses.append(
+            "re.extract_version = (SELECT extract_version FROM relation_extractions ORDER BY created_at DESC, relation_id DESC LIMIT 1)"
+        )
 
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     params.append(max(1, min(limit, 5000)))
@@ -206,6 +222,9 @@ def get_relations_table(
         SELECT
             re.relation_id,
             re.source_doc_key,
+            re.source_unit_number,
+            re.source_unit_id,
+            re.source_unit_text,
             re.target_norm_key,
             re.relation_type,
             re.direction,
@@ -219,7 +238,8 @@ def get_relations_table(
             rv.explanation AS llm_explanation,
             rv.llm_confidence,
             rv.llm_model,
-            rv.prompt_version
+            rv.prompt_version,
+            re.extract_version
         FROM relation_extractions re
         {join}
         {where_sql}
@@ -247,6 +267,9 @@ def get_relations_qa_samples(db_path: Path, relation_type: str, n: int = 30):
         SELECT
             relation_id,
             source_doc_key,
+            source_unit_number,
+            source_unit_id,
+            source_unit_text,
             target_norm_key,
             relation_type,
             direction,
