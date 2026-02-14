@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 
@@ -235,3 +236,114 @@ def test_structure_rewrite_lock_handles_bad_quotes_until_real_next_article(
 
     units = [unit for unit in store.list_units("DOC-6") if unit.unit_type == "ARTICULO"]
     assert [unit.unit_number for unit in units] == ["1", "2"]
+
+
+def test_structure_accepts_dynamic_baseline_from_article_three(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    text_dir = data_dir / "text"
+    text_dir.mkdir(parents=True)
+    text_path = text_dir / "DOC-7.txt"
+    text_path.write_text(
+        "RESUELVE:\n"
+        "ARTÍCULO 3°.- Inicio real de modificatoria parcial.\n"
+        "ARTÍCULO 4°.- Continuación.\n",
+        encoding="utf-8",
+    )
+
+    store = DocumentStore(data_dir / "state" / "rg_atp.sqlite")
+    store.initialize()
+    store.upsert(_record_for_text("DOC-7", text_path))
+
+    run_structure(
+        store,
+        data_dir,
+        StructureOptions(
+            doc_key=None,
+            limit=None,
+            force=False,
+            include_needs_ocr=False,
+            export_json=False,
+        ),
+        logger=logging.getLogger(__name__),
+    )
+
+    units = [unit for unit in store.list_units("DOC-7") if unit.unit_type == "ARTICULO"]
+    assert [unit.unit_number for unit in units] == ["3", "4"]
+
+    doc_structure = store.get_doc_structure("DOC-7")
+    assert doc_structure is not None and doc_structure.notes is not None
+    metrics = json.loads(doc_structure.notes).get("metrics", {})
+    assert metrics.get("sequence_jumps_detected") == 0
+    assert metrics.get("articles_embedded_skipped") == 0
+
+
+def test_structure_uses_resuelve_fallback_when_missing_header(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    text_dir = data_dir / "text"
+    text_dir.mkdir(parents=True)
+    text_path = text_dir / "DOC-8.txt"
+    text_path.write_text(
+        "TEXTO DE CABECERA\n"
+        "ARTÍCULO 1°.- Texto uno.\n"
+        "ARTÍCULO 2°.- Texto dos.\n",
+        encoding="utf-8",
+    )
+
+    store = DocumentStore(data_dir / "state" / "rg_atp.sqlite")
+    store.initialize()
+    store.upsert(_record_for_text("DOC-8", text_path))
+
+    run_structure(
+        store,
+        data_dir,
+        StructureOptions(
+            doc_key=None,
+            limit=None,
+            force=False,
+            include_needs_ocr=False,
+            export_json=False,
+        ),
+        logger=logging.getLogger(__name__),
+    )
+
+    units = [unit for unit in store.list_units("DOC-8") if unit.unit_type == "ARTICULO"]
+    assert [unit.unit_number for unit in units] == ["1", "2"]
+
+    doc_structure = store.get_doc_structure("DOC-8")
+    assert doc_structure is not None and doc_structure.notes is not None
+    metrics = json.loads(doc_structure.notes).get("metrics", {})
+    assert metrics.get("used_resuelve_fallback") == 1
+
+
+def test_structure_accepts_bis_sequence_as_structural(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    text_dir = data_dir / "text"
+    text_dir.mkdir(parents=True)
+    text_path = text_dir / "DOC-9.txt"
+    text_path.write_text(
+        "RESUELVE:\n"
+        "ARTÍCULO 3°.- Texto base.\n"
+        "ARTÍCULO 3bis.- Texto bis sin espacio.\n"
+        "ARTÍCULO 4°.- Texto siguiente.\n",
+        encoding="utf-8",
+    )
+
+    store = DocumentStore(data_dir / "state" / "rg_atp.sqlite")
+    store.initialize()
+    store.upsert(_record_for_text("DOC-9", text_path))
+
+    run_structure(
+        store,
+        data_dir,
+        StructureOptions(
+            doc_key=None,
+            limit=None,
+            force=False,
+            include_needs_ocr=False,
+            export_json=False,
+        ),
+        logger=logging.getLogger(__name__),
+    )
+
+    units = [unit for unit in store.list_units("DOC-9") if unit.unit_type == "ARTICULO"]
+    assert [unit.unit_number for unit in units] == ["3", "3 bis", "4"]

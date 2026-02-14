@@ -390,14 +390,25 @@ def _extract_articles(raw_text: str) -> dict[str, list[dict[str, str]] | dict[st
     annex_positions = [match.start() for match in ANNEX_RE.finditer(raw_text)]
     line_starts = _line_starts(raw_text)
     resuelve_start = _find_resuelve_start(raw_text)
+    used_resuelve_fallback = False
+
+    if resuelve_start is None:
+        for candidate in candidates:
+            if not _is_hard_negative_header(candidate.header_text):
+                resuelve_start = candidate.start_char
+                used_resuelve_fallback = True
+                break
 
     articles: list[dict[str, str]] = []
     expected_next = 1
     rewrite_lock = False
     rewrite_lock_line: int | None = None
     rewrite_lock_triggers = 0
+    rewrite_lock_timeout_releases = 0
     embedded_skipped = 0
     sequence_jumps = 0
+    accepted_count = 0
+    last_accepted_base: int | None = None
 
     for idx, candidate in enumerate(candidates):
         start = candidate.start_char
@@ -413,13 +424,17 @@ def _extract_articles(raw_text: str) -> dict[str, list[dict[str, str]] | dict[st
             embedded_skipped += 1
             continue
 
-        if rewrite_lock and _should_release_rewrite_lock(
-            raw_text,
-            candidate,
-            rewrite_lock_line,
-        ):
-            rewrite_lock = False
-            rewrite_lock_line = None
+        if rewrite_lock:
+            release_lock, release_reason = _should_release_rewrite_lock(
+                raw_text,
+                candidate,
+                rewrite_lock_line,
+            )
+            if release_lock:
+                rewrite_lock = False
+                rewrite_lock_line = None
+                if release_reason == "timeout":
+                    rewrite_lock_timeout_releases += 1
 
         if rewrite_lock:
             embedded_skipped += 1
@@ -428,16 +443,24 @@ def _extract_articles(raw_text: str) -> dict[str, list[dict[str, str]] | dict[st
         if resuelve_start is None or start < resuelve_start:
             continue
 
-        is_expected = (
-            candidate.number_base == expected_next
-            or candidate.number_base == expected_next + 1
-        )
-        if not is_expected:
-            if candidate.number_base < expected_next:
-                embedded_skipped += 1
-            else:
-                embedded_skipped += 1
+        should_accept = False
+        if accepted_count == 0:
+            should_accept = candidate.suffix is None
+        elif candidate.suffix:
+            should_accept = (
+                last_accepted_base is not None
+                and candidate.number_base == last_accepted_base
+            )
+        else:
+            should_accept = (
+                candidate.number_base == expected_next
+                or candidate.number_base == expected_next + 1
+            )
+
+        if not should_accept:
+            if accepted_count > 0 and not candidate.suffix and candidate.number_base > expected_next + 1:
                 sequence_jumps += 1
+            embedded_skipped += 1
             continue
 
         articles.append(
@@ -448,7 +471,11 @@ def _extract_articles(raw_text: str) -> dict[str, list[dict[str, str]] | dict[st
             }
         )
 
-        expected_next = candidate.number_base + 1
+        accepted_count += 1
+        if not candidate.suffix:
+            expected_next = candidate.number_base + 1
+            last_accepted_base = candidate.number_base
+
         if _contains_rewrite_trigger(slice_text):
             rewrite_lock = True
             rewrite_lock_line = end_line
@@ -460,7 +487,9 @@ def _extract_articles(raw_text: str) -> dict[str, list[dict[str, str]] | dict[st
         "articles_structural_inserted": len(articles),
         "articles_embedded_skipped": embedded_skipped,
         "rewrite_lock_triggers": rewrite_lock_triggers,
+        "rewrite_lock_timeout_releases": rewrite_lock_timeout_releases,
         "sequence_jumps_detected": sequence_jumps,
+        "used_resuelve_fallback": int(used_resuelve_fallback),
         "structure_confidence": confidence_label,
     }
     return {"articles": articles, "metrics": metrics}
@@ -553,6 +582,7 @@ def _extract_article_candidates(raw_text: str) -> list[ArticleCandidate]:
         if parsed is None:
             continue
         number_base, suffix = parsed
+        number_raw = f"{number_base} {suffix}" if suffix else str(number_base)
         start_char = match.start()
         start_line = _line_for_char(start_char, line_starts)
         line_end = raw_text.find("\n", start_char)
@@ -571,7 +601,11 @@ def _extract_article_candidates(raw_text: str) -> list[ArticleCandidate]:
 
 
 def _parse_article_token(value: str) -> tuple[int, str | None] | None:
-    match = re.match(r"(\d+)(?:\s*(bis|ter|quater|quinquies))?", value, re.IGNORECASE)
+    match = re.match(
+        r"^(\d+)(?:\s*(bis|ter|quater|quinquies))?$",
+        value,
+        re.IGNORECASE,
+    )
     if not match:
         return None
     return int(match.group(1)), (match.group(2).lower() if match.group(2) else None)
@@ -606,19 +640,19 @@ def _should_release_rewrite_lock(
     raw_text: str,
     candidate: ArticleCandidate,
     rewrite_lock_line: int | None,
-) -> bool:
+) -> tuple[bool, str | None]:
     if rewrite_lock_line is not None and candidate.start_line - rewrite_lock_line > 45:
-        return True
+        return True, "timeout"
 
     short_segment = raw_text[max(0, candidate.start_char - 300) : candidate.start_char]
     margin_aligned = len(candidate.header_text) == len(candidate.header_text.lstrip())
     if margin_aligned and not _contains_rewrite_trigger(short_segment):
-        return True
+        return True, "margin_no_trigger"
 
     quote_count = short_segment.count('"')
     if "”" in short_segment or quote_count >= 2:
-        return True
-    return False
+        return True, "quotes"
+    return False, None
 
 
 def _normalize_for_matching(text: str) -> str:
