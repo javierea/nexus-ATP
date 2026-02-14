@@ -263,6 +263,154 @@ def get_filter_options(db_path: Path) -> dict[str, list[Any]]:
     }
 
 
+
+def get_structure_summary(db_path: Path) -> dict[str, Any]:
+    """Return aggregate metrics for structure stage dashboards."""
+    if not db_path.exists():
+        return {
+            "total_docs": 0,
+            "structured_ok": 0,
+            "partial": 0,
+            "error": 0,
+            "without_structure": 0,
+            "units_total": 0,
+            "articles_total": 0,
+            "avg_confidence": None,
+            "last_structured_at": None,
+        }
+
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(d.doc_key) AS total_docs,
+                SUM(CASE WHEN ds.structure_status = 'STRUCTURED' THEN 1 ELSE 0 END) AS structured_ok,
+                SUM(CASE WHEN ds.structure_status = 'PARTIAL' THEN 1 ELSE 0 END) AS partial,
+                SUM(CASE WHEN ds.structure_status = 'ERROR' THEN 1 ELSE 0 END) AS error,
+                SUM(CASE WHEN ds.doc_key IS NULL THEN 1 ELSE 0 END) AS without_structure,
+                COALESCE(SUM(ds.articles_detected), 0) AS articles_total,
+                AVG(ds.structure_confidence) AS avg_confidence,
+                MAX(ds.structured_at) AS last_structured_at
+            FROM documents d
+            LEFT JOIN doc_structure ds ON ds.doc_key = d.doc_key
+            """
+        ).fetchone()
+        units_total = conn.execute("SELECT COUNT(*) FROM units").fetchone()[0]
+
+    if not row:
+        return {
+            "total_docs": 0,
+            "structured_ok": 0,
+            "partial": 0,
+            "error": 0,
+            "without_structure": 0,
+            "units_total": 0,
+            "articles_total": 0,
+            "avg_confidence": None,
+            "last_structured_at": None,
+        }
+
+    return {
+        "total_docs": row[0] or 0,
+        "structured_ok": row[1] or 0,
+        "partial": row[2] or 0,
+        "error": row[3] or 0,
+        "without_structure": row[4] or 0,
+        "units_total": units_total or 0,
+        "articles_total": row[5] or 0,
+        "avg_confidence": row[6],
+        "last_structured_at": row[7],
+    }
+
+
+def get_structure_anomalies(
+    db_path: Path,
+    filters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return suspicious structure records to audit from UI filters."""
+    if not db_path.exists():
+        return []
+
+    payload = filters or {}
+    where_clauses = [
+        "("
+        "ds.structure_status IN ('PARTIAL', 'ERROR') "
+        "OR ds.structure_confidence < ? "
+        "OR (ds.structure_status = 'STRUCTURED' AND COALESCE(ds.articles_detected, 0) = 0)"
+        ")"
+    ]
+    params: list[Any] = [float(payload.get("confidence_lt", 0.6))]
+
+    if payload.get("doc_family"):
+        where_clauses.append("d.doc_family = ?")
+        params.append(payload["doc_family"])
+    if payload.get("year") is not None:
+        where_clauses.append("d.year = ?")
+        params.append(int(payload["year"]))
+    if payload.get("structure_status"):
+        where_clauses.append("ds.structure_status = ?")
+        params.append(payload["structure_status"])
+
+    limit = int(payload.get("limit", 200))
+    params.append(max(1, min(limit, 2000)))
+
+    query = f"""
+        SELECT
+            d.doc_key,
+            d.doc_family,
+            d.year,
+            COALESCE(d.text_status, 'NONE') AS text_status,
+            ds.structure_status,
+            ds.structure_confidence,
+            ds.articles_detected,
+            ds.annexes_detected,
+            ds.notes,
+            ds.structured_at
+        FROM documents d
+        JOIN doc_structure ds ON ds.doc_key = d.doc_key
+        WHERE {' AND '.join(where_clauses)}
+        ORDER BY ds.structured_at DESC, d.doc_key ASC
+        LIMIT ?
+    """
+
+    with _connect(db_path) as conn:
+        cur = conn.execute(query, params)
+        rows = cur.fetchall()
+        columns = [col[0] for col in cur.description]
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def get_units_for_doc(db_path: Path, doc_key: str) -> list[dict[str, Any]]:
+    """Return units generated for one document key."""
+    if not db_path.exists() or not doc_key.strip():
+        return []
+
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            SELECT
+                id,
+                doc_key,
+                unit_type,
+                unit_number,
+                title,
+                start_line,
+                end_line,
+                start_char,
+                end_char,
+                LENGTH(text) AS text_length,
+                substr(text, 1, 320) AS text_preview,
+                created_at
+            FROM units
+            WHERE doc_key = ?
+            ORDER BY id ASC
+            """,
+            (doc_key.strip(),),
+        )
+        rows = cur.fetchall()
+        columns = [col[0] for col in cur.description]
+    return [dict(zip(columns, row)) for row in rows]
+
 def _build_filters(filters: dict[str, Any]) -> tuple[str, list[Any]]:
     where = []
     params: list[Any] = []
