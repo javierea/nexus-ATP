@@ -17,7 +17,7 @@ SECTION_HEADER_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 ARTICLE_RE = re.compile(
-    r"^\s*(?:ART(?:[ÍI]CULO)?|ART\.)\s+(\d+\s*(?:[º°])?)",
+    r"(?im)^(?:[ \t]*)(?:ART[ÍI]CULO|Art[íi]culo|ART\.|Art\.)\s+(\d+(?:\s*(?:bis|ter|quater|quinquies))?)\s*[º°]?\s*[:.\-]",
     re.IGNORECASE | re.MULTILINE,
 )
 ANNEX_RE = re.compile(
@@ -74,7 +74,18 @@ class StructuredDocument:
     articles: list[dict[str, str]]
     annexes: list[dict[str, str]]
     warnings: list[str]
+    metrics: dict[str, int | str]
     confidence: float
+
+
+@dataclass(frozen=True)
+class ArticleCandidate:
+    number_raw: str
+    number_base: int
+    suffix: str | None
+    header_text: str
+    start_char: int
+    start_line: int
 
 
 def run_structure(
@@ -190,7 +201,7 @@ def run_structure(
                 structure_confidence=structured.confidence,
                 articles_detected=articles_detected,
                 annexes_detected=annexes_detected,
-                notes=json.dumps(structured.warnings),
+                notes=json.dumps({"warnings": structured.warnings, "metrics": structured.metrics}, ensure_ascii=False),
                 structured_at=_now_iso(),
             )
         )
@@ -202,6 +213,7 @@ def run_structure(
                 "articles": structured.articles,
                 "annexes": structured.annexes,
                 "metrics": {
+                    **structured.metrics,
                     "articles_detected": articles_detected,
                     "confidence": structured.confidence,
                     "warnings": structured.warnings,
@@ -230,7 +242,9 @@ def run_structure(
 
 def _segment_text(raw_text: str) -> StructuredDocument:
     sections = _extract_sections(raw_text)
-    articles = _extract_articles(raw_text)
+    article_parse = _extract_articles(raw_text)
+    articles = article_parse["articles"]
+    metrics = article_parse["metrics"]
     annexes = _extract_annexes(raw_text)
     warnings = _collect_warnings(raw_text, sections, articles)
 
@@ -313,7 +327,7 @@ def _segment_text(raw_text: str) -> StructuredDocument:
             )
         )
 
-    confidence = _compute_confidence(raw_text, sections, articles, annexes)
+    confidence = _compute_confidence(raw_text, sections, articles, annexes, metrics)
     cleaned_sections = {
         "header": sections["header"],
         "visto": sections.get("visto"),
@@ -326,6 +340,7 @@ def _segment_text(raw_text: str) -> StructuredDocument:
         articles=[_strip_range(item) for item in articles],
         annexes=[_strip_range(item) for item in annexes],
         warnings=warnings,
+        metrics=metrics,
         confidence=confidence,
     )
 
@@ -370,28 +385,114 @@ def _extract_sections(raw_text: str) -> dict[str, str | None]:
     return sections
 
 
-def _extract_articles(raw_text: str) -> list[dict[str, str]]:
-    matches = list(ARTICLE_RE.finditer(raw_text))
+def _extract_articles(raw_text: str) -> dict[str, list[dict[str, str]] | dict[str, int | str]]:
+    candidates = _extract_article_candidates(raw_text)
     annex_positions = [match.start() for match in ANNEX_RE.finditer(raw_text)]
     line_starts = _line_starts(raw_text)
+    resuelve_start = _find_resuelve_start(raw_text)
+    used_resuelve_fallback = False
+
+    if resuelve_start is None:
+        for candidate in candidates:
+            if not _is_hard_negative_header(candidate.header_text):
+                resuelve_start = candidate.start_char
+                used_resuelve_fallback = True
+                break
 
     articles: list[dict[str, str]] = []
-    for idx, match in enumerate(matches):
-        start = match.start()
-        next_article = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw_text)
+    expected_next = 1
+    rewrite_lock = False
+    rewrite_lock_line: int | None = None
+    rewrite_lock_triggers = 0
+    rewrite_lock_timeout_releases = 0
+    embedded_skipped = 0
+    sequence_jumps = 0
+    accepted_count = 0
+    last_accepted_base: int | None = None
+
+    for idx, candidate in enumerate(candidates):
+        start = candidate.start_char
+        next_article = (
+            candidates[idx + 1].start_char if idx + 1 < len(candidates) else len(raw_text)
+        )
         next_annex = _next_boundary(annex_positions, start)
         end = min(next_article, next_annex) if next_annex is not None else next_article
         slice_text, start_char, end_char = _trim_slice(raw_text, start, end)
-        number = match.group(1).strip()
         start_line, end_line = _span_lines(raw_text, start_char, end_char, line_starts)
+
+        if _is_hard_negative_header(candidate.header_text):
+            embedded_skipped += 1
+            continue
+
+        if rewrite_lock:
+            release_lock, release_reason = _should_release_rewrite_lock(
+                raw_text,
+                candidate,
+                rewrite_lock_line,
+            )
+            if release_lock:
+                rewrite_lock = False
+                rewrite_lock_line = None
+                if release_reason == "timeout":
+                    rewrite_lock_timeout_releases += 1
+
+        if rewrite_lock:
+            embedded_skipped += 1
+            continue
+
+        if resuelve_start is None or start < resuelve_start:
+            continue
+
+        should_accept = False
+        if accepted_count == 0:
+            should_accept = candidate.suffix is None
+        elif candidate.suffix:
+            should_accept = (
+                last_accepted_base is not None
+                and candidate.number_base == last_accepted_base
+            )
+        else:
+            should_accept = (
+                candidate.number_base == expected_next
+                or candidate.number_base == expected_next + 1
+            )
+
+        if not should_accept:
+            if accepted_count > 0 and not candidate.suffix and candidate.number_base > expected_next + 1:
+                sequence_jumps += 1
+            embedded_skipped += 1
+            continue
+
         articles.append(
             {
-                "number": number,
+                "number": candidate.number_raw,
                 "text": slice_text,
                 "_range": (start_char, end_char, start_line, end_line),
             }
         )
-    return articles
+
+        accepted_count += 1
+        if not candidate.suffix:
+            expected_next = candidate.number_base + 1
+            last_accepted_base = candidate.number_base
+
+        if _contains_rewrite_trigger(slice_text):
+            rewrite_lock = True
+            rewrite_lock_line = end_line
+            rewrite_lock_triggers += 1
+
+    confidence_label = "ALTA" if articles and sequence_jumps == 0 else "MEDIA" if articles else "BAJA"
+    metrics: dict[str, int | str] = {
+        "candidates_total": len(candidates),
+        "articles_structural_inserted": len(articles),
+        "articles_embedded_skipped": embedded_skipped,
+        "rewrite_lock_triggers": rewrite_lock_triggers,
+        "rewrite_lock_timeout_releases": rewrite_lock_timeout_releases,
+        "sequence_jumps_detected": sequence_jumps,
+        "used_resuelve_fallback": int(used_resuelve_fallback),
+        "structure_confidence": confidence_label,
+    }
+    return {"articles": articles, "metrics": metrics}
 
 
 def _extract_annexes(raw_text: str) -> list[dict[str, str]]:
@@ -447,8 +548,16 @@ def _compute_confidence(
     sections: dict[str, str | None],
     articles: list[dict[str, str]],
     annexes: list[dict[str, str]],
+    metrics: dict[str, int | str],
 ) -> float:
-    score = 0.3
+    inserted = int(metrics.get("articles_structural_inserted", 0))
+    jumps = int(metrics.get("sequence_jumps_detected", 0))
+    if inserted == 0:
+        return 0.3
+    if jumps > 0:
+        return 0.65
+
+    score = 0.7
     if sections.get("resuelve"):
         score += 0.2
     if articles:
@@ -462,6 +571,93 @@ def _compute_confidence(
     if re.search(r"\bANEXO\b", raw_text, re.IGNORECASE) and annexes:
         score += 0.1
     return max(0.0, min(1.0, score))
+
+
+def _extract_article_candidates(raw_text: str) -> list[ArticleCandidate]:
+    line_starts = _line_starts(raw_text)
+    candidates: list[ArticleCandidate] = []
+    for match in ARTICLE_RE.finditer(raw_text):
+        number_raw = re.sub(r"\s+", " ", match.group(1).strip())
+        parsed = _parse_article_token(number_raw)
+        if parsed is None:
+            continue
+        number_base, suffix = parsed
+        number_raw = f"{number_base} {suffix}" if suffix else str(number_base)
+        start_char = match.start()
+        start_line = _line_for_char(start_char, line_starts)
+        line_end = raw_text.find("\n", start_char)
+        header_line = raw_text[start_char:] if line_end == -1 else raw_text[start_char:line_end]
+        candidates.append(
+            ArticleCandidate(
+                number_raw=number_raw,
+                number_base=number_base,
+                suffix=suffix,
+                header_text=header_line,
+                start_char=start_char,
+                start_line=start_line,
+            )
+        )
+    return candidates
+
+
+def _parse_article_token(value: str) -> tuple[int, str | None] | None:
+    match = re.match(
+        r"^(\d+)(?:\s*(bis|ter|quater|quinquies))?$",
+        value,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return int(match.group(1)), (match.group(2).lower() if match.group(2) else None)
+
+
+def _is_hard_negative_header(header_text: str) -> bool:
+    return bool(re.match(r'^\s*[-–—]?\s*[“"]', header_text))
+
+
+def _find_resuelve_start(raw_text: str) -> int | None:
+    for match in SECTION_HEADER_RE.finditer(raw_text):
+        heading = match.group(1).strip().upper()
+        if heading.startswith("RESUEL"):
+            return match.start()
+    return None
+
+
+def _contains_rewrite_trigger(text: str) -> bool:
+    normalized = _normalize_for_matching(text[:1200])
+    triggers = (
+        "quedara redactad",
+        "de la siguiente manera",
+        "sustituyese",
+        "incorporase",
+        "reemplazase",
+        "el que quedara redactado",
+    )
+    return any(trigger in normalized for trigger in triggers)
+
+
+def _should_release_rewrite_lock(
+    raw_text: str,
+    candidate: ArticleCandidate,
+    rewrite_lock_line: int | None,
+) -> tuple[bool, str | None]:
+    if rewrite_lock_line is not None and candidate.start_line - rewrite_lock_line > 45:
+        return True, "timeout"
+
+    short_segment = raw_text[max(0, candidate.start_char - 300) : candidate.start_char]
+    margin_aligned = len(candidate.header_text) == len(candidate.header_text.lstrip())
+    if margin_aligned and not _contains_rewrite_trigger(short_segment):
+        return True, "margin_no_trigger"
+
+    quote_count = short_segment.count('"')
+    if "”" in short_segment or quote_count >= 2:
+        return True, "quotes"
+    return False, None
+
+
+def _normalize_for_matching(text: str) -> str:
+    replacements = str.maketrans("áéíóúÁÉÍÓÚ", "aeiouAEIOU")
+    return text.translate(replacements).lower()
 
 
 def _trim_slice(raw_text: str, start: int, end: int) -> tuple[str, int, int]:
