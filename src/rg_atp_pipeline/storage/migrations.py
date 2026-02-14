@@ -367,11 +367,15 @@ def ensure_schema(db_path: Path) -> None:
             for optional in ["source_unit_id", "source_unit_number", "source_unit_text", "extracted_match_snippet"]:
                 if optional in old_rel_cols:
                     base.append(optional)
+            select_base = [f"old.{column}" for column in base]
             conn.execute(
                 f"""
-                INSERT INTO relation_extractions ({', '.join(base + ['extract_version'])})
-                SELECT {', '.join(base)}, 'relext-v1'
-                FROM relation_extractions_old
+                INSERT OR IGNORE INTO relation_extractions ({', '.join(base + ['extract_version'])})
+                SELECT {', '.join(select_base)}, 'relext-v1'
+                FROM relation_extractions_old AS old
+                JOIN citations c ON c.citation_id = old.citation_id
+                LEFT JOIN citation_links l ON l.link_id = old.link_id
+                WHERE old.link_id IS NULL OR l.link_id IS NOT NULL
                 """
             )
             conn.execute("DROP TABLE relation_extractions_old")
