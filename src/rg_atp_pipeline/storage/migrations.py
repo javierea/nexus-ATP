@@ -320,7 +320,29 @@ def ensure_schema(db_path: Path) -> None:
         relation_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(relation_extractions)")
         }
+        relation_reviews_backup: list[tuple] = []
         if "extract_version" not in relation_columns:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='relation_llm_reviews'"
+            ).fetchone():
+                relation_reviews_backup = conn.execute(
+                    """
+                    SELECT
+                        relation_id,
+                        llm_model,
+                        prompt_version,
+                        relation_type,
+                        direction,
+                        scope,
+                        scope_detail,
+                        llm_confidence,
+                        explanation,
+                        created_at
+                    FROM relation_llm_reviews
+                    """
+                ).fetchall()
+                conn.execute("DROP TABLE relation_llm_reviews")
+            conn.execute("PRAGMA defer_foreign_keys = ON")
             conn.execute("ALTER TABLE relation_extractions RENAME TO relation_extractions_old")
             conn.execute(
                 """
@@ -432,6 +454,24 @@ def ensure_schema(db_path: Path) -> None:
             )
             """
         )
+        if relation_reviews_backup:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO relation_llm_reviews (
+                    relation_id,
+                    llm_model,
+                    prompt_version,
+                    relation_type,
+                    direction,
+                    scope,
+                    scope_detail,
+                    llm_confidence,
+                    explanation,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                relation_reviews_backup,
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_relation_extractions_source_doc_key "
             "ON relation_extractions(source_doc_key)"
