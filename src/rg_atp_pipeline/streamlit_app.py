@@ -22,13 +22,16 @@ from rg_atp_pipeline.queries import (
     get_confidence_distribution,
     get_filter_options,
     get_kpis,
+    get_structure_anomalies,
+    get_structure_summary,
+    get_units_for_doc,
     list_backlog,
     list_documents,
     recent_activity,
 )
 from rg_atp_pipeline.state import load_state
 from rg_atp_pipeline.storage_sqlite import DocumentStore
-from rg_atp_pipeline.structure_segmenter import StructureOptions, run_structure
+from rg_atp_pipeline.structure_ui import run_structure_ui
 from rg_atp_pipeline.text_extractor import ExtractOptions, run_extract
 from rg_atp_pipeline.audit_compendio import (
     review_missing_downloads,
@@ -98,6 +101,21 @@ def cached_backlog(db_path_str: str, kind: str, limit: int) -> list[dict[str, An
 @st.cache_data(ttl=10)
 def cached_activity(db_path_str: str, limit: int) -> list[dict[str, Any]]:
     return recent_activity(Path(db_path_str), limit=limit)
+
+
+@st.cache_data(ttl=10)
+def cached_structure_summary(db_path_str: str) -> dict[str, Any]:
+    return get_structure_summary(Path(db_path_str))
+
+
+@st.cache_data(ttl=10)
+def cached_structure_anomalies(db_path_str: str, filters: dict[str, Any]) -> list[dict[str, Any]]:
+    return get_structure_anomalies(Path(db_path_str), filters)
+
+
+@st.cache_data(ttl=10)
+def cached_units_for_doc(db_path_str: str, doc_key: str) -> list[dict[str, Any]]:
+    return get_units_for_doc(Path(db_path_str), doc_key)
 
 
 @st.cache_data(ttl=10)
@@ -342,11 +360,24 @@ def cached_relation_scopes(db_path_str: str) -> list[str]:
 def render_pipeline_overview(db_path: Path) -> None:
     st.title("Pipeline Overview")
     summary = cached_citations_summary(str(db_path))
+    structure_summary = cached_structure_summary(str(db_path))
 
     docs_col1, docs_col2, docs_col3 = st.columns(3)
     docs_col1.metric("Total RGs", summary.get("total_rgs", 0))
     docs_col2.metric("RG con estructura", summary.get("rgs_with_structure", 0))
     docs_col3.metric("RG listas para RAG", summary.get("rgs_ready_for_rag", 0))
+
+    st.subheader("Estructura (Etapa 3)")
+    st_col1, st_col2, st_col3, st_col4 = st.columns(4)
+    st_col1.metric("STRUCTURED", structure_summary.get("structured_ok", 0))
+    st_col2.metric("PARTIAL", structure_summary.get("partial", 0))
+    st_col3.metric("ERROR", structure_summary.get("error", 0))
+    st_col4.metric("Sin estructura", structure_summary.get("without_structure", 0))
+    st_col5, st_col6, st_col7 = st.columns(3)
+    st_col5.metric("Units", structure_summary.get("units_total", 0))
+    st_col6.metric("Artículos detectados", structure_summary.get("articles_total", 0))
+    avg_conf = structure_summary.get("avg_confidence")
+    st_col7.metric("Confianza promedio", f"{avg_conf:.2f}" if isinstance(avg_conf, (int, float)) else "N/A")
 
     st.subheader("Citations (Etapa 4)")
     cit_col1, cit_col2, cit_col3, cit_col4 = st.columns(4)
@@ -826,73 +857,135 @@ def render_extract(db_path: Path, store: DocumentStore, logger: logging.Logger) 
 
 
 def render_structure(db_path: Path, store: DocumentStore, logger: logging.Logger) -> None:
-    st.title("Structure")
+    st.title("Etapa 3 — Estructura")
 
-    with st.form("structure_form"):
-        doc_key = st.text_input("Doc key (opcional)")
-        limit = st.text_input("Límite")
-        force = st.checkbox("Reprocesar")
-        include_needs_ocr = st.checkbox("Incluir NEEDS_OCR")
-        export_json = st.checkbox("Exportar JSON", value=True)
-        submitted = st.form_submit_button("Ejecutar structure")
-
-    if submitted:
-        options = StructureOptions(
-            doc_key=doc_key.strip() or None,
-            limit=parse_optional_int(limit),
-            force=force,
-            include_needs_ocr=include_needs_ocr,
-            export_json=export_json,
-        )
-        with st.spinner("Ejecutando structure..."):
-            summary = run_structure(store, data_dir(), options, logger)
-        st.success(f"Structure completado: {summary.as_dict()}")
-        st.cache_data.clear()
-
-    st.subheader("Documentos")
-    filters = cached_filters(str(db_path))
-    filter_cols = st.columns(3)
-    with filter_cols[0]:
-        structure_status = st.selectbox(
-            "Structure status", ["Todos"] + filters["structure_statuses"]
-        )
-    with filter_cols[1]:
-        family = st.selectbox("Familia", ["Todos"] + filters["doc_families"])
-    with filter_cols[2]:
-        year_filter = st.selectbox("Año", ["Todos"] + [str(y) for y in filters["years"]])
-
-    list_filters: dict[str, Any] = {}
-    if structure_status != "Todos":
-        list_filters["structure_status"] = structure_status
-    if family != "Todos":
-        list_filters["doc_family"] = family
-    if year_filter != "Todos":
-        list_filters["year"] = int(year_filter)
-
-    docs = cached_documents(str(db_path), list_filters, limit=200)
-    columns = [
-        "doc_key",
-        "doc_family",
-        "year",
-        "structure_status",
-        "articles_detected",
-        "structure_confidence",
-        "structured_at",
-    ]
-    filtered = [{key: doc.get(key) for key in columns} for doc in docs]
-    st.dataframe(maybe_dataframe(filtered))
-
-    st.subheader("Ver JSON estructurado")
-    json_doc_key = st.selectbox(
-        "Doc key", ["-"] + [doc["doc_key"] for doc in filtered if doc.get("doc_key")]
+    run_tab, summary_tab, anomalies_tab, units_tab = st.tabs(
+        ["Ejecutar 3", "Resumen", "Anomalías", "Units por doc"]
     )
-    if json_doc_key and json_doc_key != "-":
-        json_path = data_dir() / "structured" / f"{json_doc_key}.json"
-        if json_path.exists():
-            with st.expander("JSON"):
-                st.code(json_path.read_text(encoding="utf-8"), language="json")
+
+    with run_tab:
+        with st.form("structure_form"):
+            doc_key = st.text_input("Doc key (opcional)")
+            limit = st.text_input("Límite")
+            force = st.checkbox("Reprocesar")
+            include_needs_ocr = st.checkbox("Incluir NEEDS_OCR")
+            export_json = st.checkbox("Exportar JSON", value=True)
+            submitted = st.form_submit_button("Ejecutar structure")
+
+        if submitted:
+            try:
+                with st.spinner("Ejecutando structure..."):
+                    summary = run_structure_ui(
+                        store=store,
+                        data_dir=data_dir(),
+                        doc_key=doc_key.strip() or None,
+                        limit=parse_optional_int(limit),
+                        force=force,
+                        include_needs_ocr=include_needs_ocr,
+                        export_json=export_json,
+                        logger=logger,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Error al ejecutar structure: {exc}")
+            else:
+                st.session_state["structure_summary_run"] = summary
+                st.success("Structure completado.")
+                st.json(summary)
+                col1, col2, col3 = st.columns(3)
+                col1.metric("processed", summary.get("processed", 0))
+                col2.metric("structured_ok", summary.get("structured_ok", 0))
+                col3.metric("partial", summary.get("partial", 0))
+                col4, col5, _ = st.columns(3)
+                col4.metric("skipped", summary.get("skipped", 0))
+                col5.metric("error", summary.get("error", 0))
+                st.cache_data.clear()
+
+    with summary_tab:
+        summary = cached_structure_summary(str(db_path))
+        latest_run = st.session_state.get("structure_summary_run") or {}
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total docs", summary.get("total_docs", 0))
+        col2.metric("STRUCTURED", summary.get("structured_ok", 0))
+        col3.metric("PARTIAL", summary.get("partial", 0))
+        col4.metric("ERROR", summary.get("error", 0))
+
+        col5, col6, col7, col8 = st.columns(4)
+        col5.metric("Sin estructura", summary.get("without_structure", 0))
+        col6.metric("Units", summary.get("units_total", 0))
+        col7.metric("Artículos", summary.get("articles_total", 0))
+        avg_conf = summary.get("avg_confidence")
+        col8.metric("Confianza promedio", f"{avg_conf:.2f}" if isinstance(avg_conf, (int, float)) else "N/A")
+
+        st.metric("Última estructuración", summary.get("last_structured_at") or "N/A")
+
+        run_col1, run_col2, run_col3 = st.columns(3)
+        run_col1.metric("Último run processed", latest_run.get("processed", 0))
+        run_col2.metric("Último run skipped", latest_run.get("skipped", 0))
+        run_col3.metric("Último run error", latest_run.get("error", 0))
+
+        filters = cached_filters(str(db_path))
+        table_filters: dict[str, Any] = {}
+        fcol1, fcol2, fcol3 = st.columns(3)
+        selected_status = fcol1.selectbox("Structure status", ["Todos"] + filters["structure_statuses"])
+        selected_family = fcol2.selectbox("Familia", ["Todos"] + filters["doc_families"])
+        selected_year = fcol3.selectbox("Año", ["Todos"] + [str(y) for y in filters["years"]])
+        if selected_status != "Todos":
+            table_filters["structure_status"] = selected_status
+        if selected_family != "Todos":
+            table_filters["doc_family"] = selected_family
+        if selected_year != "Todos":
+            table_filters["year"] = int(selected_year)
+
+        docs = cached_documents(str(db_path), table_filters, limit=200)
+        columns = [
+            "doc_key",
+            "doc_family",
+            "year",
+            "structure_status",
+            "articles_detected",
+            "structure_confidence",
+            "structured_at",
+        ]
+        filtered = [{key: doc.get(key) for key in columns} for doc in docs]
+        st.dataframe(maybe_dataframe(filtered), use_container_width=True)
+
+    with anomalies_tab:
+        filters = cached_filters(str(db_path))
+        col1, col2, col3, col4, col5 = st.columns(5)
+        family = col1.selectbox("Familia (anom)", ["Todos"] + filters["doc_families"], index=0)
+        year_filter = col2.selectbox("Año (anom)", ["Todos"] + [str(y) for y in filters["years"]], index=0)
+        st_status = col3.selectbox("Estado estructura (anom)", ["Todos"] + filters["structure_statuses"], index=0)
+        conf_lt = col4.slider("Confianza <", 0.0, 1.0, 0.6, 0.05)
+        limit_rows = col5.slider("Límite", 50, 1000, 200, 50)
+
+        anomaly_filters: dict[str, Any] = {
+            "confidence_lt": conf_lt,
+            "limit": limit_rows,
+        }
+        if family != "Todos":
+            anomaly_filters["doc_family"] = family
+        if year_filter != "Todos":
+            anomaly_filters["year"] = int(year_filter)
+        if st_status != "Todos":
+            anomaly_filters["structure_status"] = st_status
+
+        anomalies = cached_structure_anomalies(str(db_path), anomaly_filters)
+        st.dataframe(maybe_dataframe(anomalies), use_container_width=True)
+
+    with units_tab:
+        doc_key = st.text_input("Doc key", key="structure_units_doc_key")
+        if doc_key.strip():
+            rows = cached_units_for_doc(str(db_path), doc_key.strip())
+            st.caption(f"Units encontradas: {len(rows)}")
+            st.dataframe(maybe_dataframe(rows), use_container_width=True)
+
+            json_path = data_dir() / "structured" / f"{doc_key.strip()}.json"
+            if json_path.exists():
+                with st.expander("JSON estructurado"):
+                    st.code(json_path.read_text(encoding="utf-8"), language="json")
         else:
-            st.info("No se encontró el JSON para este doc_key.")
+            st.info("Ingresa un doc_key para ver unidades.")
 
 
 def render_audit(db_path: Path) -> None:
