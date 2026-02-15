@@ -572,6 +572,146 @@ def test_relations_service_merges_llm_update_when_unique_key_collides(tmp_path: 
     assert rows[0][5] == "LLM corrected"
 
 
+def test_relations_service_upserts_duplicate_regex_relations_and_reuses_relation_for_review(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "RG-2024-908",
+                "1",
+                "ARTICLE",
+                "Modifícase la Ley 83-F",
+                "LEY",
+                "LEY-83-F",
+                "Modifícase la Ley 83-F",
+                0.75,
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        citation_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO citation_links (
+                citation_id, target_norm_id, target_norm_key, resolution_status,
+                resolution_confidence, created_at
+            ) VALUES (?, NULL, ?, 'RESOLVED', ?, ?)
+            """,
+            (citation_id, "LEY-83-F", 0.95, "2026-01-01T00:00:00+00:00"),
+        )
+        link_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, source_unit_id, source_unit_number,
+                source_unit_text, target_norm_key, extract_version,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet,
+                explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                citation_id,
+                link_id,
+                "RG-2024-908",
+                1,
+                "1",
+                "Modifícase la Ley 83-F",
+                "LEY-83-F",
+                "relext-v2",
+                "MODIFIES",
+                "OUTGOING",
+                "ARTICLE",
+                "1",
+                "MIXED",
+                0.61,
+                "",
+                "",
+                "",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        existing_relation_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+
+    def fake_extract(_text):
+        from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+
+        return [
+            RelationCandidate(
+                relation_type="MODIFIES",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="1",
+                confidence=0.7,
+                evidence_snippet="Modifícase",
+                explanation="candidate low",
+            ),
+            RelationCandidate(
+                relation_type="MODIFIES",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="1",
+                confidence=0.8,
+                evidence_snippet="Modifícase la Ley 83-F completa",
+                explanation="candidate better",
+            ),
+        ]
+
+    def fake_verify(payload, **_kwargs):
+        return [
+            {
+                "candidate_id": payload[0]["candidate_id"],
+                "relation_type": "MODIFIES",
+                "direction": "OUTGOING",
+                "scope": "ARTICLE",
+                "scope_detail": "1",
+                "confidence": 0.9,
+                "explanation": "LLM ok",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "rg_atp_pipeline.services.relations_service.extract_relation_candidates",
+        fake_extract,
+    )
+    monkeypatch.setattr(
+        "rg_atp_pipeline.services.relations_service.verify_relation_candidates",
+        fake_verify,
+    )
+
+    summary = run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-908"],
+        limit_docs=None,
+        llm_mode="verify",
+        min_confidence=0.9,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    assert summary["collisions_merged_now"] == 1
+    assert summary["updates_now"] >= 1
+
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM relation_extractions").fetchone()[0]
+        review_relation_id = conn.execute(
+            "SELECT relation_id FROM relation_llm_reviews ORDER BY review_id DESC LIMIT 1"
+        ).fetchone()[0]
+
+    assert count == 1
+    assert review_relation_id == existing_relation_id
+
+
 def test_relations_service_handles_unparseable_llm_string_response(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "state" / "rg_atp.sqlite"
     ensure_schema(db_path)
