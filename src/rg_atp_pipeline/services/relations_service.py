@@ -626,14 +626,18 @@ def _insert_relation_extraction(
     extract_version: str,
 ) -> tuple[int | None, bool, bool]:
     now = datetime.now(timezone.utc).isoformat()
+    normalized_target_norm_key, normalized_scope_detail = _normalize_relation_index_fields(
+        target_norm_key=row["target_norm_key"],
+        scope_detail=candidate.scope_detail,
+    )
     existing_before = _select_relation_by_unique_key(
         conn,
         source_doc_key=row["source_doc_key"],
         source_unit_id=row["source_unit_id"],
-        target_norm_key=row["target_norm_key"],
+        target_norm_key=normalized_target_norm_key,
         relation_type=candidate.relation_type,
         scope=candidate.scope,
-        scope_detail=candidate.scope_detail,
+        scope_detail=normalized_scope_detail,
         method=method,
         extract_version=extract_version,
     )
@@ -677,11 +681,11 @@ def _insert_relation_extraction(
             _safe_int(row["source_unit_id"]),
             row["source_unit_number"],
             row["source_unit_text"],
-            row["target_norm_key"],
+            normalized_target_norm_key,
             candidate.relation_type,
             candidate.direction,
             candidate.scope,
-            candidate.scope_detail,
+            normalized_scope_detail,
             method,
             candidate.confidence,
             candidate.evidence_snippet,
@@ -697,10 +701,10 @@ def _insert_relation_extraction(
         conn,
         source_doc_key=row["source_doc_key"],
         source_unit_id=row["source_unit_id"],
-        target_norm_key=row["target_norm_key"],
+        target_norm_key=normalized_target_norm_key,
         relation_type=candidate.relation_type,
         scope=candidate.scope,
-        scope_detail=candidate.scope_detail,
+        scope_detail=normalized_scope_detail,
         method=method,
         extract_version=extract_version,
     )
@@ -747,6 +751,10 @@ def _select_relation_by_unique_key(
             extract_version,
         ),
     ).fetchone()
+
+
+def _normalize_relation_index_fields(target_norm_key: Any, scope_detail: Any) -> tuple[str, str]:
+    return str(target_norm_key or "").strip(), str(scope_detail or "").strip()
 
 
 def _relation_unique_key(

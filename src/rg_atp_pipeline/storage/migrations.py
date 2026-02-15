@@ -429,6 +429,20 @@ def ensure_schema(db_path: Path) -> None:
         )
         conn.execute(
             """
+            UPDATE relation_extractions
+            SET target_norm_key = ''
+            WHERE target_norm_key IS NULL
+            """
+        )
+        conn.execute(
+            """
+            UPDATE relation_extractions
+            SET scope_detail = ''
+            WHERE scope_detail IS NULL
+            """
+        )
+        conn.execute(
+            """
             CREATE UNIQUE INDEX IF NOT EXISTS ux_relation_extractions_unit_target_type
             ON relation_extractions(
                 source_doc_key,

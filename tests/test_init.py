@@ -359,3 +359,73 @@ def test_ensure_schema_skips_orphan_relation_reviews_on_migration(tmp_path: Path
 
     assert rel_ids == [1]
     assert review_ids == [1]
+
+
+def test_ensure_schema_backfills_relation_nullable_unique_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "RG-2",
+                "1",
+                "ARTICLE",
+                "texto",
+                "LEY",
+                "LEY-2",
+                "snippet",
+                0.9,
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        citation_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, source_unit_id, source_unit_number,
+                source_unit_text, target_norm_key, extract_version,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet,
+                explanation, created_at
+            ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                citation_id,
+                "RG-2",
+                1,
+                "1",
+                "texto",
+                None,
+                "relext-v2",
+                "REPEALS",
+                "OUTGOING",
+                "WHOLE_NORM",
+                None,
+                "REGEX",
+                0.5,
+                "snippet",
+                "snippet",
+                "exp",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        conn.commit()
+
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT target_norm_key, scope_detail FROM relation_extractions LIMIT 1"
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == ""
+    assert row[1] == ""
