@@ -24,6 +24,15 @@ class StructuredUnit:
     text: str
 
 
+@dataclass
+class PendingRelationInsert:
+    row: sqlite3.Row
+    candidate: RelationCandidate
+    method: str
+    should_verify: bool
+    unit_text: str
+
+
 def ensure_dict(value: Any) -> dict[str, Any]:
     """Normalize dynamic payloads to dict, preserving raw content when needed."""
     if value is None:
@@ -83,6 +92,8 @@ def run_relations(
     skipped_according_to_no_target_now = 0
     inserted_according_to_with_target_now = 0
     collisions_merged_now = 0
+    inserts_now = 0
+    updates_now = 0
     skipped_according_to_no_target_samples: list[dict[str, Any]] = []
 
     logger.info(
@@ -117,6 +128,11 @@ def run_relations(
         pending_llm: list[dict[str, Any]] = []
         units_cache: dict[str, dict[str, StructuredUnit]] = {}
 
+        index_sql = _get_relation_unique_index_sql(conn)
+        if index_sql:
+            logger.debug("Stage 4.1 unique index ux_relation_extractions_unit_target_type: %s", index_sql)
+
+        deduped_pending: dict[tuple[Any, ...], PendingRelationInsert] = {}
         for row in rows:
             links_seen += 1
             doc_key = str(row["source_doc_key"])
@@ -146,55 +162,84 @@ def run_relations(
                 method = "REGEX"
                 if should_verify:
                     method = "MIXED"
-                relation_id, inserted = _insert_relation_extraction(
-                    conn,
-                    row,
-                    candidate,
+
+                dedup_key = _relation_unique_key(
+                    source_doc_key=row["source_doc_key"],
+                    source_unit_id=row["source_unit_id"],
+                    target_norm_key=row["target_norm_key"],
+                    relation_type=candidate.relation_type,
+                    scope=candidate.scope,
+                    scope_detail=candidate.scope_detail,
                     method=method,
                     extract_version=extract_version,
                 )
-                if inserted:
-                    relations_inserted += 1
-                    candidates_inserted_now += 1
-                    by_type_inserted[candidate.relation_type] = by_type_inserted.get(candidate.relation_type, 0) + 1
-                    if (
-                        candidate.relation_type == "ACCORDING_TO"
-                        and _has_target_norm_key(row["target_norm_key"])
-                    ):
-                        inserted_according_to_with_target_now += 1
+                pending = PendingRelationInsert(
+                    row=row,
+                    candidate=candidate,
+                    method=method,
+                    should_verify=should_verify,
+                    unit_text=text,
+                )
+                existing_pending = deduped_pending.get(dedup_key)
+                deduped_pending[dedup_key] = (
+                    pending if existing_pending is None else _pick_preferred_pending_relation(existing_pending, pending)
+                )
 
-                final_type = candidate.relation_type
-                final_conf = candidate.confidence
-                if should_verify and relation_id is not None:
-                    if _has_relation_review(
-                        conn,
-                        relation_id=relation_id,
-                        llm_model=model,
-                        prompt_version=prompt_version,
-                    ):
-                        skipped_already_reviewed_count += 1
-                        continue
-                    pending_llm.append(
-                        {
-                            "relation_id": relation_id,
-                            "inserted_now": inserted,
-                            "candidate_id": str(relation_id),
-                            "row": row,
-                            "candidate": candidate,
-                            "citation_raw_text": row["raw_text"],
-                            "evidence_snippet": candidate.evidence_snippet,
-                            "unit_text": text,
-                            "source_unit_number": row["source_unit_number"],
-                            "target_norm_key": row["target_norm_key"],
-                            "regex_relation_type": candidate.relation_type,
-                            "regex_scope": candidate.scope,
-                            "regex_scope_detail": candidate.scope_detail,
-                            "regex_confidence": candidate.confidence,
-                        }
-                    )
-                if final_type == "UNKNOWN" or final_conf < 0.5:
-                    unknown_count += 1
+        for pending in deduped_pending.values():
+            row = pending.row
+            candidate = pending.candidate
+            relation_id, inserted, updated = _insert_relation_extraction(
+                conn,
+                row,
+                candidate,
+                method=pending.method,
+                extract_version=extract_version,
+            )
+            if updated:
+                updates_now += 1
+                collisions_merged_now += 1
+            if inserted:
+                inserts_now += 1
+                relations_inserted += 1
+                candidates_inserted_now += 1
+                by_type_inserted[candidate.relation_type] = by_type_inserted.get(candidate.relation_type, 0) + 1
+                if (
+                    candidate.relation_type == "ACCORDING_TO"
+                    and _has_target_norm_key(row["target_norm_key"])
+                ):
+                    inserted_according_to_with_target_now += 1
 
+            final_type = candidate.relation_type
+            final_conf = candidate.confidence
+            if pending.should_verify and relation_id is not None:
+                if _has_relation_review(
+                    conn,
+                    relation_id=relation_id,
+                    llm_model=model,
+                    prompt_version=prompt_version,
+                ):
+                    skipped_already_reviewed_count += 1
+                    continue
+                pending_llm.append(
+                    {
+                        "relation_id": relation_id,
+                        "inserted_now": inserted,
+                        "candidate_id": str(relation_id),
+                        "row": row,
+                        "candidate": candidate,
+                        "citation_raw_text": row["raw_text"],
+                        "evidence_snippet": candidate.evidence_snippet,
+                        "unit_text": pending.unit_text,
+                        "source_unit_number": row["source_unit_number"],
+                        "target_norm_key": row["target_norm_key"],
+                        "regex_relation_type": candidate.relation_type,
+                        "regex_scope": candidate.scope,
+                        "regex_scope_detail": candidate.scope_detail,
+                        "regex_confidence": candidate.confidence,
+                    }
+                )
+            if final_type == "UNKNOWN" or final_conf < 0.5:
+                unknown_count += 1
         gated_count = len(pending_llm)
         logger.info(
             "Stage 4.1 candidates: total_candidates_detected=%s candidates_inserted_now=%s gated_count=%s skipped_already_reviewed_count=%s",
@@ -328,6 +373,7 @@ def run_relations(
                     merged = _update_relation_with_review(conn, relation_id, normalized)
                     if merged:
                         collisions_merged_now += 1
+                        updates_now += 1
                     if item.get("inserted_now") and normalized["relation_type"] == "ACCORDING_TO" and _has_target_norm_key(
                         item["target_norm_key"]
                     ):
@@ -363,6 +409,8 @@ def run_relations(
         "skipped_according_to_no_target_now": skipped_according_to_no_target_now,
         "inserted_according_to_with_target_now": inserted_according_to_with_target_now,
         "collisions_merged_now": collisions_merged_now,
+        "inserts_now": inserts_now,
+        "updates_now": updates_now,
         "skipped_according_to_no_target_samples": skipped_according_to_no_target_samples,
         "errors": errors,
     }
@@ -477,15 +525,51 @@ def _insert_relation_extraction(
     candidate: RelationCandidate,
     method: str,
     extract_version: str,
-) -> tuple[int | None, bool]:
+) -> tuple[int | None, bool, bool]:
     now = datetime.now(timezone.utc).isoformat()
+    existing_before = _select_relation_by_unique_key(
+        conn,
+        source_doc_key=row["source_doc_key"],
+        source_unit_id=row["source_unit_id"],
+        target_norm_key=row["target_norm_key"],
+        relation_type=candidate.relation_type,
+        scope=candidate.scope,
+        scope_detail=candidate.scope_detail,
+        method=method,
+        extract_version=extract_version,
+    )
+
     cur = conn.execute(
         """
-        INSERT OR IGNORE INTO relation_extractions (
+        INSERT INTO relation_extractions (
             citation_id, link_id, source_doc_key, source_unit_id, source_unit_number, source_unit_text, target_norm_key,
             relation_type, direction, scope, scope_detail,
             method, confidence, evidence_snippet, extracted_match_snippet, explanation, created_at, extract_version
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO UPDATE SET
+            confidence = MAX(confidence, excluded.confidence),
+            extracted_match_snippet = CASE
+                WHEN COALESCE(relation_extractions.extracted_match_snippet, '') = ''
+                THEN excluded.extracted_match_snippet
+                ELSE relation_extractions.extracted_match_snippet
+            END,
+            source_unit_text = CASE
+                WHEN COALESCE(relation_extractions.source_unit_text, '') = ''
+                THEN excluded.source_unit_text
+                ELSE relation_extractions.source_unit_text
+            END,
+            evidence_snippet = CASE
+                WHEN COALESCE(relation_extractions.evidence_snippet, '') = ''
+                THEN excluded.evidence_snippet
+                ELSE relation_extractions.evidence_snippet
+            END,
+            explanation = CASE
+                WHEN COALESCE(relation_extractions.explanation, '') = ''
+                THEN excluded.explanation
+                ELSE relation_extractions.explanation
+            END,
+            citation_id = excluded.citation_id,
+            link_id = excluded.link_id
         """,
         (
             row["citation_id"],
@@ -508,30 +592,117 @@ def _insert_relation_extraction(
             extract_version,
         ),
     )
-    if cur.rowcount:
-        relation_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        return relation_id, True
-    existing = conn.execute(
+    if not cur.rowcount:
+        return None, False, False
+    existing_after = _select_relation_by_unique_key(
+        conn,
+        source_doc_key=row["source_doc_key"],
+        source_unit_id=row["source_unit_id"],
+        target_norm_key=row["target_norm_key"],
+        relation_type=candidate.relation_type,
+        scope=candidate.scope,
+        scope_detail=candidate.scope_detail,
+        method=method,
+        extract_version=extract_version,
+    )
+    if existing_after is None:
+        return None, False, False
+    inserted = existing_before is None
+    updated = existing_before is not None
+    return int(existing_after["relation_id"]), inserted, updated
+
+
+def _select_relation_by_unique_key(
+    conn: sqlite3.Connection,
+    source_doc_key: Any,
+    source_unit_id: Any,
+    target_norm_key: Any,
+    relation_type: Any,
+    scope: Any,
+    scope_detail: Any,
+    method: Any,
+    extract_version: Any,
+) -> sqlite3.Row | None:
+    return conn.execute(
         """
         SELECT relation_id
         FROM relation_extractions
-        WHERE citation_id = ? AND link_id = ? AND source_unit_id = ? AND relation_type = ?
-          AND scope = ? AND COALESCE(scope_detail, '') = COALESCE(?, '')
+        WHERE source_doc_key = ?
+          AND source_unit_id = ?
+          AND COALESCE(target_norm_key, '') = COALESCE(?, '')
+          AND relation_type = ?
+          AND scope = ?
+          AND COALESCE(scope_detail, '') = COALESCE(?, '')
           AND method = ?
           AND extract_version = ?
+        LIMIT 1
         """,
         (
-            row["citation_id"],
-            row["link_id"],
-            _safe_int(row["source_unit_id"]),
-            candidate.relation_type,
-            candidate.scope,
-            candidate.scope_detail,
+            source_doc_key,
+            _safe_int(source_unit_id),
+            target_norm_key,
+            relation_type,
+            scope,
+            scope_detail,
             method,
             extract_version,
         ),
     ).fetchone()
-    return (int(existing[0]), False) if existing else (None, False)
+
+
+def _relation_unique_key(
+    source_doc_key: Any,
+    source_unit_id: Any,
+    target_norm_key: Any,
+    relation_type: Any,
+    scope: Any,
+    scope_detail: Any,
+    method: Any,
+    extract_version: Any,
+) -> tuple[Any, ...]:
+    return (
+        str(source_doc_key or "").strip(),
+        _safe_int(source_unit_id),
+        str(target_norm_key or "").strip(),
+        str(relation_type or "").strip(),
+        str(scope or "").strip(),
+        str(scope_detail or "").strip(),
+        str(method or "").strip(),
+        str(extract_version or "").strip(),
+    )
+
+
+def _pick_preferred_pending_relation(
+    current: PendingRelationInsert,
+    candidate: PendingRelationInsert,
+) -> PendingRelationInsert:
+    left = current.candidate
+    right = candidate.candidate
+    left_conf = float(left.confidence or 0.0)
+    right_conf = float(right.confidence or 0.0)
+    if right_conf > left_conf:
+        return candidate
+    if right_conf < left_conf:
+        return current
+    left_snippet_len = len(str(left.evidence_snippet or "").strip())
+    right_snippet_len = len(str(right.evidence_snippet or "").strip())
+    if right_snippet_len > left_snippet_len:
+        return candidate
+    return current
+
+
+def _get_relation_unique_index_sql(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'index' AND name = 'ux_relation_extractions_unit_target_type'
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row[0] or "").strip() or None
 
 
 def _normalize_llm_batch_response(value: Any) -> list[Any]:
