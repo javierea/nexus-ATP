@@ -805,3 +805,287 @@ def test_relations_service_handles_unparseable_llm_string_response(tmp_path: Pat
     assert review["status"] == "PARSE_ERROR"
     assert "not-json-response" in (review["raw_response"] or "")
     assert review["relation_type"] == "UNKNOWN"
+
+
+def _seed_verify_relation_case(db_path: Path, doc_key: str) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                doc_key,
+                "1",
+                "ARTICLE",
+                "Modifícase la Ley 83-F",
+                "LEY",
+                "LEY-83-F",
+                "Modifícase la Ley 83-F",
+                0.7,
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        citation_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO citation_links (
+                citation_id, target_norm_id, target_norm_key, resolution_status,
+                resolution_confidence, created_at
+            ) VALUES (?, NULL, ?, 'RESOLVED', ?, ?)
+            """,
+            (citation_id, "LEY-83-F", 0.95, "2026-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+
+
+def test_relations_service_llm_invalid_id_and_missing_result(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    _seed_verify_relation_case(db_path, "RG-2024-910")
+
+    def fake_extract(_text):
+        from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+
+        return [
+            RelationCandidate(
+                relation_type="MODIFIES",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="1",
+                confidence=0.7,
+                evidence_snippet="Modifícase la Ley 83-F",
+                explanation="regex candidate",
+            ),
+            RelationCandidate(
+                relation_type="REPEALS",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="2",
+                confidence=0.7,
+                evidence_snippet="Modifícase la Ley 83-F",
+                explanation="regex candidate 2",
+            ),
+        ]
+
+    def fake_verify(_payload, **_kwargs):
+        return [{"candidate_id": "LEY-83-F", "relation_type": "MODIFIES"}]
+
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.extract_relation_candidates", fake_extract)
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.verify_relation_candidates", fake_verify)
+
+    summary = run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-910"],
+        limit_docs=None,
+        llm_mode="verify",
+        min_confidence=0.9,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    assert summary["invalid_id_now"] >= 1
+    assert summary["missing_result_now"] >= 1
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT status, raw_item FROM relation_llm_reviews"
+        ).fetchall()
+    assert rows
+    statuses = {row["status"] for row in rows}
+    assert "MISSING_RESULT" in statuses
+
+
+def test_relations_service_llm_empty_response_marks_all_expected(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    _seed_verify_relation_case(db_path, "RG-2024-911")
+
+    def fake_extract(_text):
+        from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+
+        return [
+            RelationCandidate(
+                relation_type="MODIFIES",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="1",
+                confidence=0.7,
+                evidence_snippet="Modifícase la Ley 83-F",
+                explanation="regex candidate",
+            )
+        ]
+
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.extract_relation_candidates", fake_extract)
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.verify_relation_candidates", lambda *_a, **_k: "")
+
+    summary = run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-911"],
+        limit_docs=None,
+        llm_mode="verify",
+        min_confidence=0.9,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    assert summary["empty_response_now"] == 1
+    with sqlite3.connect(db_path) as conn:
+        status = conn.execute("SELECT status FROM relation_llm_reviews LIMIT 1").fetchone()[0]
+    assert status == "EMPTY_RESPONSE"
+
+
+def test_relations_service_llm_invalid_structure_marks_invalid_response(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    _seed_verify_relation_case(db_path, "RG-2024-912")
+
+    def fake_extract(_text):
+        from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+
+        return [
+            RelationCandidate(
+                relation_type="MODIFIES",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="1",
+                confidence=0.7,
+                evidence_snippet="Modifícase la Ley 83-F",
+                explanation="regex candidate",
+            ),
+            RelationCandidate(
+                relation_type="REPEALS",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="2",
+                confidence=0.7,
+                evidence_snippet="Modifícase la Ley 83-F",
+                explanation="regex candidate 2",
+            ),
+        ]
+
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.extract_relation_candidates", fake_extract)
+    monkeypatch.setattr(
+        "rg_atp_pipeline.services.relations_service.verify_relation_candidates",
+        lambda *_a, **_k: [{"candidate_id": None, "relation_type": "MODIFIES"}],
+    )
+
+    summary = run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-912"],
+        limit_docs=None,
+        llm_mode="verify",
+        min_confidence=0.9,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    assert summary["invalid_id_now"] >= 1
+    assert summary["missing_result_now"] >= 1
+
+
+def test_relations_service_verify_all_gates_all_eligible(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    _seed_verify_relation_case(db_path, "RG-2024-913")
+
+    def fake_extract(_text):
+        from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+
+        return [
+            RelationCandidate(
+                relation_type="MODIFIES",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="1",
+                confidence=0.95,
+                evidence_snippet="Modifícase la Ley 83-F",
+                explanation="regex candidate",
+            )
+        ]
+
+    def fake_verify(payload, **_kwargs):
+        return [
+            {
+                "candidate_id": payload[0]["candidate_id"],
+                "relation_type": "MODIFIES",
+                "direction": "OUTGOING",
+                "scope": "ARTICLE",
+                "scope_detail": "1",
+                "confidence": 0.88,
+                "explanation": "LLM verified",
+            }
+        ]
+
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.extract_relation_candidates", fake_extract)
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.verify_relation_candidates", fake_verify)
+
+    summary = run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-913"],
+        limit_docs=None,
+        llm_mode="verify_all",
+        min_confidence=0.9,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    assert summary["gated_count"] == summary["candidates_inserted_now"] == 1
+    assert summary["ok_reviews_now"] == 1
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM relation_llm_reviews").fetchone()[0]
+    assert count == 1
+
+
+def test_relations_service_invalid_id_persists_raw_item(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    _seed_verify_relation_case(db_path, "RG-2024-914")
+
+    def fake_extract(_text):
+        from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+
+        return [
+            RelationCandidate(
+                relation_type="MODIFIES",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="1",
+                confidence=0.7,
+                evidence_snippet="Modifícase la Ley 83-F",
+                explanation="regex candidate",
+            )
+        ]
+
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.extract_relation_candidates", fake_extract)
+    monkeypatch.setattr(
+        "rg_atp_pipeline.services.relations_service.verify_relation_candidates",
+        lambda *_a, **_k: [{"candidate_id": "LEY-83-F", "foo": "bar"}],
+    )
+
+    run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-914"],
+        limit_docs=None,
+        llm_mode="verify",
+        min_confidence=0.9,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT status, raw_item FROM relation_llm_reviews WHERE status = 'INVALID_ID' LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    assert row["raw_item"]

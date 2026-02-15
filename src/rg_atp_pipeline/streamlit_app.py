@@ -523,7 +523,7 @@ def render_relations_stage(db_path: Path) -> None:
         with st.form("relations_form"):
             doc_keys_raw = st.text_input("Doc keys (coma o espacio)")
             limit_docs_raw = st.text_input("Límite de documentos (opcional)")
-            llm_mode = st.selectbox("Modo LLM", ["off", "verify"], index=0)
+            llm_mode = st.selectbox("Modo LLM", ["off", "verify", "verify_all"], index=0)
             min_confidence = st.slider("Confianza mínima", 0.5, 0.95, 0.9, 0.01)
             prompt_version = st.text_input("Prompt version", value="reltype-v1")
 
@@ -558,8 +558,8 @@ def render_relations_stage(db_path: Path) -> None:
                         min_confidence=min_confidence,
                         prompt_version=prompt_version,
                         batch_size=int(batch_size),
-                        ollama_model=ollama_model if llm_mode == "verify" else None,
-                        ollama_base_url=ollama_base_url if llm_mode == "verify" else None,
+                        ollama_model=ollama_model if llm_mode in {"verify", "verify_all"} else None,
+                        ollama_base_url=ollama_base_url if llm_mode in {"verify", "verify_all"} else None,
                     )
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Error al ejecutar Etapa 4.1: {exc}")
@@ -587,8 +587,8 @@ def render_relations_stage(db_path: Path) -> None:
                     "inserted_according_to_with_target_now",
                     summary.get("inserted_according_to_with_target_now", 0),
                 )
-                if summary.get("llm_mode_effective") == "verify" and int(summary.get("gated_count", 0) or 0) == 0:
-                    st.warning("LLM en modo verify sin candidatos gated (gated_count=0).")
+                if summary.get("llm_mode_effective") in {"verify", "verify_all"} and int(summary.get("gated_count", 0) or 0) == 0:
+                    st.warning(f"LLM en modo {summary.get('llm_mode_effective')} sin candidatos gated (gated_count=0).")
                 st.cache_data.clear()
 
     with summary_tab:
@@ -619,8 +619,8 @@ def render_relations_stage(db_path: Path) -> None:
             "inserted_according_to_with_target_now",
             latest_run.get("inserted_according_to_with_target_now", 0),
         )
-        if latest_run.get("llm_mode_effective") == "verify" and int(latest_run.get("gated_count", 0) or 0) == 0:
-            st.warning("Última corrida en modo verify sin candidatos gated (gated_count=0).")
+        if latest_run.get("llm_mode_effective") in {"verify", "verify_all"} and int(latest_run.get("gated_count", 0) or 0) == 0:
+            st.warning(f"Última corrida en modo {latest_run.get('llm_mode_effective')} sin candidatos gated (gated_count=0).")
 
         by_type = [
             {"relation_type": key, "count": value}
