@@ -407,7 +407,7 @@ def relations(
         "--limit-docs",
         help="Máximo de documentos a procesar.",
     ),
-    llm: str = typer.Option("off", "--llm", help="Modo LLM: off | verify."),
+    llm: str = typer.Option("off", "--llm", help="Modo LLM: off | verify | verify_all."),
     min_confidence: float = typer.Option(
         0.6,
         "--min-confidence",

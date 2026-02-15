@@ -72,6 +72,8 @@ def run_relations(
     logger = logging.getLogger("rg_atp_pipeline.relations")
     config = load_config(config_path())
     llm_mode = str(llm_mode).strip().lower()
+    if llm_mode not in {"off", "verify", "verify_all"}:
+        llm_mode = "off"
     model = ollama_model or config.ollama_model
     base_url = ollama_base_url or config.ollama_base_url
     timeout_sec = config.llm_timeout_sec
@@ -95,6 +97,13 @@ def run_relations(
     inserts_now = 0
     updates_now = 0
     skipped_according_to_no_target_samples: list[dict[str, Any]] = []
+    ok_reviews_now = 0
+    parse_error_now = 0
+    invalid_id_now = 0
+    invalid_response_now = 0
+    empty_response_now = 0
+    missing_result_now = 0
+    batches_unparsable_now = 0
 
     logger.info(
         "Stage 4.1 LLM config: llm_mode=%r threshold/min_confidence=%s batch_size=%s prompt_version=%s model=%s",
@@ -144,7 +153,10 @@ def run_relations(
             for candidate in candidates:
                 by_type_detected[candidate.relation_type] = by_type_detected.get(candidate.relation_type, 0) + 1
 
-                should_verify = llm_mode == "verify" and 0.6 <= candidate.confidence < min_confidence
+                should_verify = (
+                    (llm_mode == "verify" and 0.6 <= candidate.confidence < min_confidence)
+                    or llm_mode == "verify_all"
+                )
                 should_insert = candidate.confidence >= min_confidence or should_verify
                 if not should_insert:
                     continue
@@ -249,10 +261,12 @@ def run_relations(
             skipped_already_reviewed_count,
         )
 
-        if llm_mode == "verify" and pending_llm:
+        if llm_mode in {"verify", "verify_all"} and pending_llm:
             for start in range(0, len(pending_llm), batch_size):
                 batch = pending_llm[start : start + batch_size]
                 batches_sent += 1
+                expected_candidate_ids = {int(item["relation_id"]) for item in batch}
+                batch_by_relation_id = {int(item["relation_id"]): item for item in batch}
                 payload = [
                     {
                         "candidate_id": item["candidate_id"],
@@ -274,18 +288,47 @@ def run_relations(
                 except Exception as exc:  # noqa: BLE001
                     errors.append(str(exc))
                     logger.error("Error LLM relations: %s", exc)
+                    for pending in batch:
+                        relation_id = int(pending["relation_id"])
+                        if _insert_relation_review_error(
+                            conn,
+                            relation_id=relation_id,
+                            llm_model=model,
+                            prompt_version=prompt_version,
+                            status="PARSE_ERROR",
+                            raw_response=_preview_value(str(exc), max_length=4000),
+                            explanation="Error invocando LLM para batch.",
+                        ):
+                            parse_error_now += 1
                     continue
                 results = _normalize_llm_batch_response(raw_results)
                 raw_response_preview = _preview_value(raw_results, max_length=4000)
-                has_parse_error_payload = any(
-                    bool(ensure_dict(entry).get("_parse_error")) for entry in results
-                )
+                has_parse_error_payload = any(bool(ensure_dict(entry).get("_parse_error")) for entry in results)
                 if not results:
                     logger.warning("Stage 4.1 empty or unparsable LLM batch response")
+                    for relation_id in expected_candidate_ids:
+                        if _insert_relation_review_error(
+                            conn,
+                            relation_id=relation_id,
+                            llm_model=model,
+                            prompt_version=prompt_version,
+                            status="EMPTY_RESPONSE",
+                            raw_response=raw_response_preview,
+                            explanation="Respuesta LLM vacía para el batch.",
+                        ):
+                            empty_response_now += 1
+                    continue
+
+                if has_parse_error_payload:
+                    batches_unparsable_now += 1
+
                 parsed: dict[int, dict[str, Any]] = {}
+                consumed_expected_ids: set[int] = set()
                 for raw_item in results:
                     try:
                         item = ensure_dict(raw_item)
+                        if item.get("_parse_error"):
+                            continue
                         candidate_id = _safe_int(item.get("candidate_id"))
                     except AttributeError:
                         _log_attribute_error(
@@ -296,20 +339,47 @@ def run_relations(
                             value=raw_item,
                         )
                         continue
-                    if candidate_id < 0:
+                    if candidate_id < 0 or candidate_id not in expected_candidate_ids:
                         logger.warning(
                             "Stage 4.1 invalid candidate_id from LLM payload: type=%s preview=%r",
                             type(raw_item).__name__,
                             _preview_value(raw_item),
                         )
+                        relation_id_for_error = min(expected_candidate_ids)
+                        if _insert_relation_review_error(
+                            conn,
+                            relation_id=relation_id_for_error,
+                            llm_model=model,
+                            prompt_version=prompt_version,
+                            status="INVALID_ID",
+                            raw_response=raw_response_preview,
+                            raw_item=item,
+                            explanation="candidate_id inválido o fuera del batch esperado.",
+                        ):
+                            invalid_id_now += 1
                         continue
+                    if candidate_id in consumed_expected_ids:
+                        relation_id_for_error = candidate_id
+                        if _insert_relation_review_error(
+                            conn,
+                            relation_id=relation_id_for_error,
+                            llm_model=model,
+                            prompt_version=prompt_version,
+                            status="INVALID_RESPONSE",
+                            raw_response=raw_response_preview,
+                            raw_item=item,
+                            explanation="Respuesta duplicada para candidate_id; se toma el primer item.",
+                        ):
+                            invalid_response_now += 1
+                        continue
+                    consumed_expected_ids.add(candidate_id)
                     parsed[candidate_id] = item
-                for item in batch:
-                    relation_id = item["relation_id"]
+                for relation_id in expected_candidate_ids:
+                    item = batch_by_relation_id[relation_id]
                     result = parsed.get(relation_id)
                     if not result:
                         if has_parse_error_payload:
-                            _insert_relation_review_error(
+                            if _insert_relation_review_error(
                                 conn,
                                 relation_id=relation_id,
                                 llm_model=model,
@@ -317,19 +387,33 @@ def run_relations(
                                 status="PARSE_ERROR",
                                 raw_response=raw_response_preview,
                                 explanation="Respuesta LLM no parseable para candidate_id.",
-                            )
-                        continue
-                    normalized = _normalize_llm_result(result)
-                    if not normalized:
-                        _insert_relation_review_error(
+                            ):
+                                parse_error_now += 1
+                            continue
+                        if _insert_relation_review_error(
                             conn,
                             relation_id=relation_id,
                             llm_model=model,
                             prompt_version=prompt_version,
-                            status="PARSE_ERROR",
+                            status="MISSING_RESULT",
+                            raw_response=raw_response_preview,
+                            explanation="LLM no devolvió resultado para candidate_id esperado.",
+                        ):
+                            missing_result_now += 1
+                        continue
+                    normalized = _normalize_llm_result(result)
+                    if not normalized:
+                        if _insert_relation_review_error(
+                            conn,
+                            relation_id=relation_id,
+                            llm_model=model,
+                            prompt_version=prompt_version,
+                            status="INVALID_RESPONSE",
                             raw_response=_preview_value(result, max_length=4000),
+                            raw_item=result,
                             explanation="No se pudo normalizar la respuesta LLM.",
-                        )
+                        ):
+                            invalid_response_now += 1
                         logger.warning(
                             "Stage 4.1 PARSE_ERROR normalizing LLM result doc_key=%s relation_id=%s type=%s preview=%r",
                             item["row"]["source_doc_key"],
@@ -347,6 +431,7 @@ def run_relations(
                     )
                     if inserted:
                         llm_verified += 1
+                        ok_reviews_now += 1
 
                     if not _should_persist_relation(
                         relation_type=normalized["relation_type"],
@@ -381,9 +466,16 @@ def run_relations(
 
         unknown_count = by_type_inserted.get("UNKNOWN", 0)
         logger.info(
-            "Stage 4.1 LLM: batches_sent=%s llm_verified=%s",
+            "Stage 4.1 LLM: batches_sent=%s llm_verified=%s ok_reviews_now=%s parse_error_now=%s invalid_id_now=%s invalid_response_now=%s empty_response_now=%s missing_result_now=%s batches_unparsable_now=%s",
             batches_sent,
             llm_verified,
+            ok_reviews_now,
+            parse_error_now,
+            invalid_id_now,
+            invalid_response_now,
+            empty_response_now,
+            missing_result_now,
+            batches_unparsable_now,
         )
         conn.commit()
 
@@ -413,6 +505,13 @@ def run_relations(
         "updates_now": updates_now,
         "skipped_according_to_no_target_samples": skipped_according_to_no_target_samples,
         "errors": errors,
+        "ok_reviews_now": ok_reviews_now,
+        "parse_error_now": parse_error_now,
+        "invalid_id_now": invalid_id_now,
+        "invalid_response_now": invalid_response_now,
+        "empty_response_now": empty_response_now,
+        "missing_result_now": missing_result_now,
+        "batches_unparsable_now": batches_unparsable_now,
     }
 
 
@@ -800,8 +899,8 @@ def _insert_relation_review(
         INSERT OR IGNORE INTO relation_llm_reviews (
             relation_id, llm_model, prompt_version,
             relation_type, direction, scope, scope_detail,
-            llm_confidence, explanation, status, raw_response, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            llm_confidence, explanation, status, raw_response, raw_item, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             relation_id,
@@ -814,6 +913,7 @@ def _insert_relation_review(
             review["confidence"],
             review["explanation"],
             "OK",
+            None,
             None,
             now,
         ),
@@ -829,15 +929,17 @@ def _insert_relation_review_error(
     status: str,
     raw_response: str,
     explanation: str,
+    raw_item: dict[str, Any] | str | None = None,
 ) -> bool:
     now = datetime.now(timezone.utc).isoformat()
+    raw_item_text = _stable_json(raw_item)
     cur = conn.execute(
         """
         INSERT OR IGNORE INTO relation_llm_reviews (
             relation_id, llm_model, prompt_version,
             relation_type, direction, scope, scope_detail,
-            llm_confidence, explanation, status, raw_response, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            llm_confidence, explanation, status, raw_response, raw_item, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             relation_id,
@@ -851,6 +953,7 @@ def _insert_relation_review_error(
             explanation[:120],
             status,
             raw_response,
+            raw_item_text,
             now,
         ),
     )
@@ -959,11 +1062,11 @@ def _update_relation_with_review(
         INSERT OR IGNORE INTO relation_llm_reviews (
             relation_id, llm_model, prompt_version,
             relation_type, direction, scope, scope_detail,
-            llm_confidence, explanation, status, raw_response, created_at
+            llm_confidence, explanation, status, raw_response, raw_item, created_at
         )
         SELECT ?, llm_model, prompt_version,
                relation_type, direction, scope, scope_detail,
-               llm_confidence, explanation, status, raw_response, created_at
+               llm_confidence, explanation, status, raw_response, raw_item, created_at
         FROM relation_llm_reviews
         WHERE relation_id = ?
         """,
@@ -984,3 +1087,14 @@ def _safe_int(value: Any) -> int:
         return int(str(value))
     except (TypeError, ValueError):
         return -1
+
+
+def _stable_json(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return _preview_value(value, max_length=4000)

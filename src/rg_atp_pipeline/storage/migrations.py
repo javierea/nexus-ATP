@@ -328,6 +328,7 @@ def ensure_schema(db_path: Path) -> None:
                 review_cols = {row[1] for row in conn.execute("PRAGMA table_info(relation_llm_reviews)")}
                 status_expr = "COALESCE(status, 'OK')" if "status" in review_cols else "'OK'"
                 raw_expr = "raw_response" if "raw_response" in review_cols else "NULL"
+                raw_item_expr = "raw_item" if "raw_item" in review_cols else "NULL"
                 relation_reviews_backup = conn.execute(
                     f"""
                     SELECT
@@ -342,6 +343,7 @@ def ensure_schema(db_path: Path) -> None:
                         explanation,
                         {status_expr} AS status,
                         {raw_expr} AS raw_response,
+                        {raw_item_expr} AS raw_item,
                         created_at
                     FROM relation_llm_reviews
                     """
@@ -466,6 +468,8 @@ def ensure_schema(db_path: Path) -> None:
             conn.execute("ALTER TABLE relation_llm_reviews ADD COLUMN status TEXT NOT NULL DEFAULT 'OK'")
         if "raw_response" not in relation_review_columns:
             conn.execute("ALTER TABLE relation_llm_reviews ADD COLUMN raw_response TEXT")
+        if "raw_item" not in relation_review_columns:
+            conn.execute("ALTER TABLE relation_llm_reviews ADD COLUMN raw_item TEXT")
 
         if relation_reviews_backup:
             relation_ids = {
@@ -489,8 +493,9 @@ def ensure_schema(db_path: Path) -> None:
                         explanation,
                         status,
                         raw_response,
+                        raw_item,
                         created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     relation_reviews_backup,
                 )
