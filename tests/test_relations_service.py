@@ -2,7 +2,8 @@ import sqlite3
 import json
 from pathlib import Path
 
-from rg_atp_pipeline.services.relations_service import run_relations
+from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+from rg_atp_pipeline.services.relations_service import _insert_relation_extraction, run_relations
 from rg_atp_pipeline.storage.migrations import ensure_schema
 
 
@@ -710,6 +711,191 @@ def test_relations_service_upserts_duplicate_regex_relations_and_reuses_relation
 
     assert count == 1
     assert review_relation_id == existing_relation_id
+
+
+def test_insert_relation_extraction_handles_upsert_integrity_and_updates_existing_key(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "RG-2024-909",
+                "1",
+                "ARTICLE",
+                "Modifícase la Ley 83-F",
+                "LEY",
+                "LEY-83-F",
+                "snippet-1",
+                0.75,
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        citation_id_1 = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO citation_links (
+                citation_id, target_norm_id, target_norm_key, resolution_status,
+                resolution_confidence, created_at
+            ) VALUES (?, NULL, ?, 'RESOLVED', ?, ?)
+            """,
+            (citation_id_1, "LEY-83-F", 0.95, "2026-01-01T00:00:00+00:00"),
+        )
+        link_id_1 = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "RG-2024-909",
+                "1",
+                "ARTICLE",
+                "Modifícase la Ley 83-G",
+                "LEY",
+                "LEY-83-G",
+                "snippet-2",
+                0.72,
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        citation_id_2 = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO citation_links (
+                citation_id, target_norm_id, target_norm_key, resolution_status,
+                resolution_confidence, created_at
+            ) VALUES (?, NULL, ?, 'RESOLVED', ?, ?)
+            """,
+            (citation_id_2, "LEY-83-G", 0.95, "2026-01-01T00:00:00+00:00"),
+        )
+        link_id_2 = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, source_unit_id, source_unit_number,
+                source_unit_text, target_norm_key, extract_version,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet,
+                explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                citation_id_1,
+                link_id_1,
+                "RG-2024-909",
+                1,
+                "1",
+                "texto base",
+                "LEY-83-F",
+                "relext-v2",
+                "MODIFIES",
+                "OUTGOING",
+                "ARTICLE",
+                "1",
+                "MIXED",
+                0.8,
+                "base",
+                "base",
+                "existing",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, source_unit_id, source_unit_number,
+                source_unit_text, target_norm_key, extract_version,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet,
+                explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                citation_id_2,
+                link_id_2,
+                "RG-2024-909",
+                1,
+                "1",
+                "texto alterno",
+                "LEY-83-G",
+                "relext-v2",
+                "MODIFIES",
+                "OUTGOING",
+                "ARTICLE",
+                "1",
+                "MIXED",
+                0.6,
+                "alt",
+                "alt",
+                "existing alt",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+        row = conn.execute(
+            """
+            SELECT c.citation_id, c.source_doc_key, c.source_unit_id,
+                   c.evidence_snippet, c.evidence_text, c.raw_text,
+                   l.link_id, l.target_norm_key,
+                   u.unit_number AS source_unit_number, u.text AS source_unit_text
+            FROM citations c
+            JOIN citation_links l ON l.citation_id = c.citation_id
+            LEFT JOIN units u ON u.id = CAST(c.source_unit_id AS INTEGER)
+            WHERE c.citation_id = ?
+            """,
+            (citation_id_2,),
+        ).fetchone()
+
+        candidate = RelationCandidate(
+            relation_type="MODIFIES",
+            direction="OUTGOING",
+            scope="ARTICLE",
+            scope_detail="1",
+            confidence=0.9,
+            evidence_snippet="snippet actualizado",
+            explanation="nuevo",
+        )
+
+        relation_id, inserted, updated = _insert_relation_extraction(
+            conn,
+            row,
+            candidate,
+            method="MIXED",
+            extract_version="relext-v2",
+        )
+
+        assert relation_id is not None
+        assert inserted is False
+        assert updated is True
+
+        merged = conn.execute(
+            """
+            SELECT citation_id, link_id, confidence
+            FROM relation_extractions
+            WHERE source_doc_key = ? AND source_unit_id = ? AND target_norm_key = ?
+              AND relation_type = ? AND scope = ? AND scope_detail = ?
+              AND method = ? AND extract_version = ?
+            """,
+            ("RG-2024-909", 1, "LEY-83-G", "MODIFIES", "ARTICLE", "1", "MIXED", "relext-v2"),
+        ).fetchone()
+        assert merged is not None
+        assert merged[0] == citation_id_2
+        assert merged[1] == link_id_2
+        assert merged[2] == 0.9
 
 
 def test_relations_service_handles_unparseable_llm_string_response(tmp_path: Path, monkeypatch) -> None:
