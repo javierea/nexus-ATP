@@ -429,3 +429,126 @@ def test_ensure_schema_backfills_relation_nullable_unique_fields(tmp_path: Path)
     assert row is not None
     assert row[0] == ""
     assert row[1] == ""
+
+
+def test_ensure_schema_dedupes_relation_extractions_before_unique_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP INDEX IF EXISTS ux_relation_extractions_unit_target_type")
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("RG-DUP", "1", "ARTICLE", "texto a", "LEY", "LEY-A", "s1", 0.9, "2026-01-01T00:00:00Z"),
+        )
+        citation_id_1 = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("RG-DUP", "1", "ARTICLE", "texto b", "LEY", "LEY-A", "s2", 0.9, "2026-01-01T00:00:01Z"),
+        )
+        citation_id_2 = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, source_unit_id, source_unit_number,
+                source_unit_text, target_norm_key, extract_version,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet,
+                explanation, created_at
+            ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                citation_id_1,
+                "RG-DUP",
+                1,
+                "1",
+                "texto",
+                "LEY-A",
+                "relext-v2",
+                "MODIFIES",
+                "OUTGOING",
+                "ARTICLE",
+                "1",
+                "MIXED",
+                0.65,
+                "snippet-1",
+                "snippet-1",
+                "exp-1",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        relation_id_1 = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, source_unit_id, source_unit_number,
+                source_unit_text, target_norm_key, extract_version,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet,
+                explanation, created_at
+            ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                citation_id_2,
+                "RG-DUP",
+                1,
+                "1",
+                "texto",
+                "LEY-A",
+                "relext-v2",
+                "MODIFIES",
+                "OUTGOING",
+                "ARTICLE",
+                "1",
+                "MIXED",
+                0.91,
+                "snippet-2",
+                "snippet-2",
+                "exp-2",
+                "2026-01-01T00:00:02Z",
+            ),
+        )
+        relation_id_2 = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        conn.execute(
+            """
+            INSERT INTO relation_llm_reviews (
+                relation_id, llm_model, prompt_version, relation_type, direction,
+                scope, scope_detail, llm_confidence, explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (relation_id_1, "model", "v1", "MODIFIES", "OUTGOING", "ARTICLE", "1", 0.7, "low", "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            """
+            INSERT INTO relation_llm_reviews (
+                relation_id, llm_model, prompt_version, relation_type, direction,
+                scope, scope_detail, llm_confidence, explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (relation_id_2, "model", "v1", "MODIFIES", "OUTGOING", "ARTICLE", "1", 0.9, "high", "2026-01-01T00:00:02Z"),
+        )
+        conn.execute("DROP INDEX IF EXISTS ux_relation_extractions_unit_target_type")
+        conn.commit()
+
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT relation_id, confidence FROM relation_extractions").fetchall()
+        reviews = conn.execute("SELECT relation_id FROM relation_llm_reviews ORDER BY relation_id").fetchall()
+
+    assert rows == [(relation_id_2, 0.91)]
+    assert reviews == [(relation_id_2,)]
