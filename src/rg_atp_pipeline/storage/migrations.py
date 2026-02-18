@@ -6,6 +6,60 @@ import sqlite3
 from pathlib import Path
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _dedupe_relation_extractions_for_unit_index(conn: sqlite3.Connection) -> None:
+    duplicate_ids = [
+        int(row[0])
+        for row in conn.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    relation_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            source_doc_key,
+                            source_unit_id,
+                            COALESCE(target_norm_key, ''),
+                            relation_type,
+                            scope,
+                            COALESCE(scope_detail, ''),
+                            method,
+                            extract_version
+                        ORDER BY
+                            confidence DESC,
+                            created_at DESC,
+                            relation_id DESC
+                    ) AS rn
+                FROM relation_extractions
+            )
+            SELECT relation_id
+            FROM ranked
+            WHERE rn > 1
+            """
+        ).fetchall()
+    ]
+    if not duplicate_ids:
+        return
+
+    placeholders = ",".join("?" for _ in duplicate_ids)
+    if _table_exists(conn, "relation_llm_reviews"):
+        conn.execute(
+            f"DELETE FROM relation_llm_reviews WHERE relation_id IN ({placeholders})",
+            duplicate_ids,
+        )
+    conn.execute(
+        f"DELETE FROM relation_extractions WHERE relation_id IN ({placeholders})",
+        duplicate_ids,
+    )
+
+
 def ensure_schema(db_path: Path) -> None:
     """Create norms catalog tables and indexes if missing."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -441,6 +495,7 @@ def ensure_schema(db_path: Path) -> None:
             WHERE scope_detail IS NULL
             """
         )
+        _dedupe_relation_extractions_for_unit_index(conn)
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS ux_relation_extractions_unit_target_type

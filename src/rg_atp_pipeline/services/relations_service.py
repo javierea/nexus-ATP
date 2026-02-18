@@ -642,59 +642,104 @@ def _insert_relation_extraction(
         extract_version=extract_version,
     )
 
-    cur = conn.execute(
-        """
-        INSERT INTO relation_extractions (
-            citation_id, link_id, source_doc_key, source_unit_id, source_unit_number, source_unit_text, target_norm_key,
-            relation_type, direction, scope, scope_detail,
-            method, confidence, evidence_snippet, extracted_match_snippet, explanation, created_at, extract_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT DO UPDATE SET
-            confidence = MAX(confidence, excluded.confidence),
-            extracted_match_snippet = CASE
-                WHEN COALESCE(relation_extractions.extracted_match_snippet, '') = ''
-                THEN excluded.extracted_match_snippet
-                ELSE relation_extractions.extracted_match_snippet
-            END,
-            source_unit_text = CASE
-                WHEN COALESCE(relation_extractions.source_unit_text, '') = ''
-                THEN excluded.source_unit_text
-                ELSE relation_extractions.source_unit_text
-            END,
-            evidence_snippet = CASE
-                WHEN COALESCE(relation_extractions.evidence_snippet, '') = ''
-                THEN excluded.evidence_snippet
-                ELSE relation_extractions.evidence_snippet
-            END,
-            explanation = CASE
-                WHEN COALESCE(relation_extractions.explanation, '') = ''
-                THEN excluded.explanation
-                ELSE relation_extractions.explanation
-            END,
-            citation_id = excluded.citation_id,
-            link_id = excluded.link_id
-        """,
-        (
-            row["citation_id"],
-            row["link_id"],
-            row["source_doc_key"],
-            _safe_int(row["source_unit_id"]),
-            row["source_unit_number"],
-            row["source_unit_text"],
-            normalized_target_norm_key,
-            candidate.relation_type,
-            candidate.direction,
-            candidate.scope,
-            normalized_scope_detail,
-            method,
-            candidate.confidence,
-            candidate.evidence_snippet,
-            candidate.evidence_snippet,
-            candidate.explanation[:150],
-            now,
-            extract_version,
-        ),
-    )
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, source_unit_id, source_unit_number, source_unit_text, target_norm_key,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet, explanation, created_at, extract_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO UPDATE SET
+                confidence = MAX(confidence, excluded.confidence),
+                extracted_match_snippet = CASE
+                    WHEN COALESCE(relation_extractions.extracted_match_snippet, '') = ''
+                    THEN excluded.extracted_match_snippet
+                    ELSE relation_extractions.extracted_match_snippet
+                END,
+                source_unit_text = CASE
+                    WHEN COALESCE(relation_extractions.source_unit_text, '') = ''
+                    THEN excluded.source_unit_text
+                    ELSE relation_extractions.source_unit_text
+                END,
+                evidence_snippet = CASE
+                    WHEN COALESCE(relation_extractions.evidence_snippet, '') = ''
+                    THEN excluded.evidence_snippet
+                    ELSE relation_extractions.evidence_snippet
+                END,
+                explanation = CASE
+                    WHEN COALESCE(relation_extractions.explanation, '') = ''
+                    THEN excluded.explanation
+                    ELSE relation_extractions.explanation
+                END
+            """,
+            (
+                row["citation_id"],
+                row["link_id"],
+                row["source_doc_key"],
+                _safe_int(row["source_unit_id"]),
+                row["source_unit_number"],
+                row["source_unit_text"],
+                normalized_target_norm_key,
+                candidate.relation_type,
+                candidate.direction,
+                candidate.scope,
+                normalized_scope_detail,
+                method,
+                candidate.confidence,
+                candidate.evidence_snippet,
+                candidate.evidence_snippet,
+                candidate.explanation[:150],
+                now,
+                extract_version,
+            ),
+        )
+    except sqlite3.IntegrityError:
+        existing_after = _select_relation_by_unique_key(
+            conn,
+            source_doc_key=row["source_doc_key"],
+            source_unit_id=row["source_unit_id"],
+            target_norm_key=normalized_target_norm_key,
+            relation_type=candidate.relation_type,
+            scope=candidate.scope,
+            scope_detail=normalized_scope_detail,
+            method=method,
+            extract_version=extract_version,
+        )
+        if existing_after is None:
+            raise
+        conn.execute(
+            """
+            UPDATE relation_extractions
+            SET confidence = MAX(confidence, ?),
+                extracted_match_snippet = CASE
+                    WHEN COALESCE(extracted_match_snippet, '') = '' THEN ?
+                    ELSE extracted_match_snippet
+                END,
+                source_unit_text = CASE
+                    WHEN COALESCE(source_unit_text, '') = '' THEN ?
+                    ELSE source_unit_text
+                END,
+                evidence_snippet = CASE
+                    WHEN COALESCE(evidence_snippet, '') = '' THEN ?
+                    ELSE evidence_snippet
+                END,
+                explanation = CASE
+                    WHEN COALESCE(explanation, '') = '' THEN ?
+                    ELSE explanation
+                END
+            WHERE relation_id = ?
+            """,
+            (
+                candidate.confidence,
+                candidate.evidence_snippet,
+                row["source_unit_text"],
+                candidate.evidence_snippet,
+                candidate.explanation[:150],
+                int(existing_after["relation_id"]),
+            ),
+        )
+        return int(existing_after["relation_id"]), False, True
     if not cur.rowcount:
         return None, False, False
     existing_after = _select_relation_by_unique_key(
