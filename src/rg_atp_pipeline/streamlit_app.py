@@ -673,7 +673,7 @@ def render_relations_stage(db_path: Path) -> None:
                 preview = table.copy()
                 preview["evidence_snippet"] = preview["evidence_snippet"].astype(str).str.slice(0, 120)
                 preview["explanation"] = preview["explanation"].astype(str).str.slice(0, 120)
-                st.dataframe(preview, use_container_width=True)
+                st.dataframe(preview, width='stretch')
 
                 selected_idx = st.number_input("Fila para detalle", min_value=0, max_value=len(table) - 1, value=0, step=1)
                 detail = table.iloc[int(selected_idx)].to_dict()
@@ -686,7 +686,7 @@ def render_relations_stage(db_path: Path) -> None:
                     }
                     for row in table
                 ]
-                st.dataframe(preview, use_container_width=True)
+                st.dataframe(preview, width='stretch')
                 selected_idx = st.number_input("Fila para detalle", min_value=0, max_value=len(table) - 1, value=0, step=1)
                 detail = table[int(selected_idx)]
             with st.expander("Detalle de registro"):
@@ -703,7 +703,7 @@ def render_relations_stage(db_path: Path) -> None:
         sample_size = st.slider("Tamaño de muestra", min_value=5, max_value=100, value=30, step=5)
         if st.button("Muestrear"):
             samples = cached_relations_samples(str(db_path), relation_type, sample_size)
-            st.dataframe(samples, use_container_width=True)
+            st.dataframe(samples, width='stretch')
 
         inconsistencies = cached_relations_inconsistencies(str(db_path))
         st.subheader("Inconsistencias")
@@ -731,7 +731,7 @@ def render_relations_stage(db_path: Path) -> None:
                 value=min(10, len(skipped_samples)),
                 step=1,
             )
-            st.dataframe(skipped_samples[:sample_limit], use_container_width=True)
+            st.dataframe(skipped_samples[:sample_limit], width='stretch')
         else:
             st.caption("No hay descartes ACCORDING_TO sin target en la última corrida.")
 
@@ -948,7 +948,7 @@ def render_structure(db_path: Path, store: DocumentStore, logger: logging.Logger
             "structured_at",
         ]
         filtered = [{key: doc.get(key) for key in columns} for doc in docs]
-        st.dataframe(maybe_dataframe(filtered), use_container_width=True)
+        st.dataframe(maybe_dataframe(filtered), width='stretch')
 
     with anomalies_tab:
         filters = cached_filters(str(db_path))
@@ -971,14 +971,14 @@ def render_structure(db_path: Path, store: DocumentStore, logger: logging.Logger
             anomaly_filters["structure_status"] = st_status
 
         anomalies = cached_structure_anomalies(str(db_path), anomaly_filters)
-        st.dataframe(maybe_dataframe(anomalies), use_container_width=True)
+        st.dataframe(maybe_dataframe(anomalies), width='stretch')
 
     with units_tab:
         doc_key = st.text_input("Doc key", key="structure_units_doc_key")
         if doc_key.strip():
             rows = cached_units_for_doc(str(db_path), doc_key.strip())
             st.caption(f"Units encontradas: {len(rows)}")
-            st.dataframe(maybe_dataframe(rows), use_container_width=True)
+            st.dataframe(maybe_dataframe(rows), width='stretch')
 
             json_path = data_dir() / "structured" / f"{doc_key.strip()}.json"
             if json_path.exists():
