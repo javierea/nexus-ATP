@@ -13,7 +13,7 @@ from typing import Any
 from rg_atp_pipeline.config import load_config
 from rg_atp_pipeline.paths import config_path
 from rg_atp_pipeline.services.relation_extractor import RelationCandidate, extract_relation_candidates
-from rg_atp_pipeline.services.relation_llm import verify_relation_candidates
+from rg_atp_pipeline.services.relation_llm import RelationLLMTransportError, verify_relation_candidates
 from rg_atp_pipeline.storage.migrations import ensure_schema
 
 
@@ -266,7 +266,9 @@ def run_relations(
                 batch = pending_llm[start : start + batch_size]
                 batches_sent += 1
                 expected_candidate_ids = {int(item["relation_id"]) for item in batch}
+                expected_candidate_ids_literal = {str(item["candidate_id"]) for item in batch}
                 batch_by_relation_id = {int(item["relation_id"]): item for item in batch}
+                relation_id_by_candidate_literal = {str(item["candidate_id"]): int(item["relation_id"]) for item in batch}
                 payload = [
                     {
                         "candidate_id": item["candidate_id"],
@@ -288,6 +290,7 @@ def run_relations(
                 except Exception as exc:  # noqa: BLE001
                     errors.append(str(exc))
                     logger.error("Error LLM relations: %s", exc)
+                    raw_error_response = _serialize_llm_exception(exc)
                     for pending in batch:
                         relation_id = int(pending["relation_id"])
                         if _insert_relation_review_error(
@@ -296,7 +299,7 @@ def run_relations(
                             llm_model=model,
                             prompt_version=prompt_version,
                             status="PARSE_ERROR",
-                            raw_response=_preview_value(str(exc), max_length=4000),
+                            raw_response=_preview_value(raw_error_response, max_length=4000),
                             explanation="Error invocando LLM para batch.",
                         ):
                             parse_error_now += 1
@@ -305,18 +308,26 @@ def run_relations(
                 raw_response_preview = _preview_value(raw_results, max_length=4000)
                 has_parse_error_payload = any(bool(ensure_dict(entry).get("_parse_error")) for entry in results)
                 if not results:
-                    logger.warning("Stage 4.1 empty or unparsable LLM batch response")
+                    is_empty_response = _is_empty_llm_response(raw_results)
+                    logger.warning("Stage 4.1 empty/unparsable batch response empty=%s", is_empty_response)
                     for relation_id in expected_candidate_ids:
                         if _insert_relation_review_error(
                             conn,
                             relation_id=relation_id,
                             llm_model=model,
                             prompt_version=prompt_version,
-                            status="EMPTY_RESPONSE",
+                            status="EMPTY_RESPONSE" if is_empty_response else "PARSE_ERROR",
                             raw_response=raw_response_preview,
-                            explanation="Respuesta LLM vacía para el batch.",
+                            explanation=(
+                                "Respuesta LLM vacía para el batch."
+                                if is_empty_response
+                                else "Respuesta LLM no parseable para el batch."
+                            ),
                         ):
-                            empty_response_now += 1
+                            if is_empty_response:
+                                empty_response_now += 1
+                            else:
+                                parse_error_now += 1
                     continue
 
                 if has_parse_error_payload:
@@ -329,7 +340,7 @@ def run_relations(
                         item = ensure_dict(raw_item)
                         if item.get("_parse_error"):
                             continue
-                        candidate_id = _safe_int(item.get("candidate_id"))
+                        candidate_id_literal = str(item.get("candidate_id") or "").strip()
                     except AttributeError:
                         _log_attribute_error(
                             logger,
@@ -339,9 +350,11 @@ def run_relations(
                             value=raw_item,
                         )
                         continue
-                    if candidate_id < 0 or candidate_id not in expected_candidate_ids:
+                    if candidate_id_literal not in expected_candidate_ids_literal:
                         logger.warning(
-                            "Stage 4.1 invalid candidate_id from LLM payload: type=%s preview=%r",
+                            "Stage 4.1 invalid candidate_id from LLM payload: expected=%s got=%r type=%s preview=%r",
+                            sorted(expected_candidate_ids_literal),
+                            candidate_id_literal,
                             type(raw_item).__name__,
                             _preview_value(raw_item),
                         )
@@ -354,10 +367,11 @@ def run_relations(
                             status="INVALID_ID",
                             raw_response=raw_response_preview,
                             raw_item=item,
-                            explanation="candidate_id inválido o fuera del batch esperado.",
+                            explanation="candidate_id inválido o fuera del batch esperado (debe ser literal).",
                         ):
                             invalid_id_now += 1
                         continue
+                    candidate_id = relation_id_by_candidate_literal[candidate_id_literal]
                     if candidate_id in consumed_expected_ids:
                         relation_id_for_error = candidate_id
                         if _insert_relation_review_error(
@@ -855,6 +869,29 @@ def _get_relation_unique_index_sql(conn: sqlite3.Connection) -> str | None:
     if row is None:
         return None
     return str(row[0] or "").strip() or None
+
+
+def _is_empty_llm_response(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, list):
+        return len(value) == 0
+    if isinstance(value, dict):
+        items = value.get("items") if isinstance(value, dict) else None
+        if isinstance(items, list):
+            return len(items) == 0
+    return False
+
+
+def _serialize_llm_exception(exc: Exception) -> str:
+    if isinstance(exc, RelationLLMTransportError):
+        try:
+            return json.dumps(exc.audit, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(exc)
+    return str(exc)
 
 
 def _normalize_llm_batch_response(value: Any) -> list[Any]:
