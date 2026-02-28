@@ -193,6 +193,14 @@ def split_rgs(
         "--skip-existing/--no-skip-existing",
         help="No sobreescribir RGs ya exportadas.",
     ),
+    page_marker_pattern: str = typer.Option(
+        r"^={5}\s*P[ÁA]GINA\s+(\d{1,3})/\d+\s*={5}$",
+        "--page-marker-pattern",
+        help=(
+            "Regex para detectar páginas en el TXT; debe incluir un grupo de captura "
+            "para el número de página."
+        ),
+    ),
 ) -> None:
     """Separar múltiples RGs desde texto extraído (post-extract, pre-structure)."""
     raw_path = Path(input_text)
@@ -201,13 +209,18 @@ def split_rgs(
         raise typer.Exit(code=1)
 
     raw_text = raw_path.read_text(encoding="utf-8")
-    starts = detect_rg_starts(raw_text, logical_page_offset=logical_page_offset)
+    starts = detect_rg_starts(
+        raw_text,
+        logical_page_offset=logical_page_offset,
+        page_marker_pattern=page_marker_pattern,
+    )
     validated = [item for item in starts if item.visto_found]
     summary = export_rg_splits(
         raw_text,
         Path(output_dir),
         logical_page_offset=logical_page_offset,
         skip_existing=skip_existing,
+        page_marker_pattern=page_marker_pattern,
     )
     typer.echo(
         json.dumps(
