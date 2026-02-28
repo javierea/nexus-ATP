@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-PAGE_MARKER_RE = re.compile(r"^===PAGE\s+(\d+)===$")
+DEFAULT_PAGE_MARKER_PATTERN = r"^={5}\s*P[ÁA]GINA\s+(\d{1,3})/\d+\s*={5}$"
 RG_HEADER_RE = re.compile(
     r"(?im)^\s*RESOLUCI[OÓ]N\s+GENERAL\s*(?:N[º°o]?\.?|N[UÚ]MERO\s*)?\s*[:\-]?\s*(\d{3,4}(?:/\d{2,4})?)\s*$"
 )
@@ -45,19 +45,24 @@ class SplitSummary:
     skipped_existing: int
 
 
-def detect_rg_starts(raw_text: str, logical_page_offset: int = 0) -> list[RGStart]:
+def detect_rg_starts(
+    raw_text: str,
+    logical_page_offset: int = 0,
+    page_marker_pattern: str = DEFAULT_PAGE_MARKER_PATTERN,
+) -> list[RGStart]:
     """Detect potential RG starts using header + VISTO validation.
 
     logical_page_offset allows mapping when index numbering starts at a later PDF page.
     Example: if index page 1 == PDF page 46, use logical_page_offset=45.
     """
 
+    page_marker_re = _compile_page_marker_pattern(page_marker_pattern)
     lines = raw_text.splitlines()
     starts: list[RGStart] = []
     current_page = 1
 
     for idx, line in enumerate(lines):
-        marker = PAGE_MARKER_RE.match(line.strip())
+        marker = page_marker_re.match(line.strip())
         if marker:
             current_page = int(marker.group(1))
             continue
@@ -83,25 +88,38 @@ def detect_rg_starts(raw_text: str, logical_page_offset: int = 0) -> list[RGStar
     return starts
 
 
-def split_rg_boundaries(raw_text: str, logical_page_offset: int = 0) -> list[RGBoundary]:
+def split_rg_boundaries(
+    raw_text: str,
+    logical_page_offset: int = 0,
+    page_marker_pattern: str = DEFAULT_PAGE_MARKER_PATTERN,
+) -> list[RGBoundary]:
     """Split raw text into RG blocks by detected starts.
 
     Keeps only starts that pass the VISTO/VISTO Y CONSIDERANDO check.
     """
 
     lines = raw_text.splitlines()
-    starts = [item for item in detect_rg_starts(raw_text, logical_page_offset) if item.visto_found]
+    page_marker_re = _compile_page_marker_pattern(page_marker_pattern)
+    starts = [
+        item
+        for item in detect_rg_starts(
+            raw_text,
+            logical_page_offset,
+            page_marker_pattern=page_marker_pattern,
+        )
+        if item.visto_found
+    ]
     if not starts:
         return []
 
-    page_by_line = _page_lookup(lines)
+    page_by_line = _page_lookup(lines, page_marker_re)
     boundaries: list[RGBoundary] = []
 
     for i, start in enumerate(starts):
         start_idx = start.start_line - 1
         end_idx = (starts[i + 1].start_line - 2) if i + 1 < len(starts) else (len(lines) - 1)
         end_idx_effective = end_idx
-        while end_idx_effective >= start_idx and PAGE_MARKER_RE.match(lines[end_idx_effective].strip()):
+        while end_idx_effective >= start_idx and page_marker_re.match(lines[end_idx_effective].strip()):
             end_idx_effective -= 1
         if end_idx_effective < start_idx:
             end_idx_effective = end_idx
@@ -130,9 +148,14 @@ def export_rg_splits(
     output_dir: Path,
     logical_page_offset: int = 0,
     skip_existing: bool = True,
+    page_marker_pattern: str = DEFAULT_PAGE_MARKER_PATTERN,
 ) -> SplitSummary:
     output_dir.mkdir(parents=True, exist_ok=True)
-    boundaries = split_rg_boundaries(raw_text, logical_page_offset=logical_page_offset)
+    boundaries = split_rg_boundaries(
+        raw_text,
+        logical_page_offset=logical_page_offset,
+        page_marker_pattern=page_marker_pattern,
+    )
     exported = 0
     skipped_existing = 0
 
@@ -156,12 +179,25 @@ def _slug(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z]+", "-", value).strip("-").upper()
 
 
-def _page_lookup(lines: list[str]) -> list[int]:
+def _page_lookup(lines: list[str], page_marker_re: re.Pattern[str]) -> list[int]:
     current_page = 1
     values: list[int] = []
     for line in lines:
-        marker = PAGE_MARKER_RE.match(line.strip())
+        marker = page_marker_re.match(line.strip())
         if marker:
             current_page = int(marker.group(1))
         values.append(current_page)
     return values
+
+
+def _compile_page_marker_pattern(page_marker_pattern: str) -> re.Pattern[str]:
+    pattern = page_marker_pattern.strip()
+    if not pattern:
+        raise ValueError("El patrón de página no puede estar vacío.")
+    try:
+        compiled = re.compile(pattern, flags=re.IGNORECASE)
+    except re.error as exc:  # pragma: no cover - branch tested indirectly
+        raise ValueError(f"Patrón de página inválido: {exc}") from exc
+    if compiled.groups < 1:
+        raise ValueError("El patrón de página debe tener al menos un grupo de captura para el número.")
+    return compiled

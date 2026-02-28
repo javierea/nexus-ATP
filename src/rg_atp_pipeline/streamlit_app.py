@@ -33,7 +33,11 @@ from rg_atp_pipeline.state import load_state
 from rg_atp_pipeline.storage_sqlite import DocumentStore
 from rg_atp_pipeline.structure_ui import run_structure_ui
 from rg_atp_pipeline.text_extractor import ExtractOptions, run_extract
-from rg_atp_pipeline.rg_detector import detect_rg_starts, export_rg_splits
+from rg_atp_pipeline.rg_detector import (
+    DEFAULT_PAGE_MARKER_PATTERN,
+    detect_rg_starts,
+    export_rg_splits,
+)
 from rg_atp_pipeline.audit_compendio import (
     review_missing_downloads,
     run_audit_compendio,
@@ -828,7 +832,7 @@ def render_extract(db_path: Path, store: DocumentStore, logger: logging.Logger) 
         input_text = st.text_input(
             "TXT de entrada",
             value=str(data_dir() / "text" / "COMPENDIO-2024.txt"),
-            help="Archivo TXT generado por extract con marcadores ===PAGE N===.",
+            help="Archivo TXT con marcadores de página configurables.",
         )
         output_dir = st.text_input(
             "Directorio salida",
@@ -841,6 +845,14 @@ def render_extract(db_path: Path, store: DocumentStore, logger: logging.Logger) 
             step=1,
             help="Ej: si índice pág. 1 coincide con PDF pág. 46, usar 45.",
         )
+        page_marker_pattern = st.text_input(
+            "Formato de página (regex)",
+            value=DEFAULT_PAGE_MARKER_PATTERN,
+            help=(
+                "Regex para detectar páginas. Debe incluir un grupo de captura para el número "
+                "de página. Default: ===== PÁGINA XXX/770 ====="
+            ),
+        )
         skip_existing = st.checkbox("Idempotente (skip existing)", value=True)
         split_submit = st.form_submit_button("Ejecutar split-rgs")
 
@@ -850,29 +862,38 @@ def render_extract(db_path: Path, store: DocumentStore, logger: logging.Logger) 
             st.error(f"No existe TXT de entrada: {input_path}")
         else:
             raw_text = input_path.read_text(encoding="utf-8")
-            starts = detect_rg_starts(raw_text, logical_page_offset=int(logical_page_offset))
-            validated = [item for item in starts if item.visto_found]
-            with st.spinner("Separando RGs..."):
-                split_summary = export_rg_splits(
+            try:
+                starts = detect_rg_starts(
                     raw_text,
-                    Path(output_dir),
                     logical_page_offset=int(logical_page_offset),
-                    skip_existing=skip_existing,
+                    page_marker_pattern=page_marker_pattern,
                 )
-            payload = {
-                "detected": len(starts),
-                "validated_visto": len(validated),
-                "processed": split_summary.exported,
-                "skipped_existing": split_summary.skipped_existing,
-                "output_dir": output_dir,
-                "idempotent": skip_existing,
-            }
-            st.session_state["split_rgs_summary"] = payload
-            st.success("Split RGs completado.")
-            st.json(payload)
-            c1, c2 = st.columns(2)
-            c1.metric("RGs detectadas", payload["detected"])
-            c2.metric("RGs procesadas", payload["processed"])
+                validated = [item for item in starts if item.visto_found]
+                with st.spinner("Separando RGs..."):
+                    split_summary = export_rg_splits(
+                        raw_text,
+                        Path(output_dir),
+                        logical_page_offset=int(logical_page_offset),
+                        skip_existing=skip_existing,
+                        page_marker_pattern=page_marker_pattern,
+                    )
+                payload = {
+                    "detected": len(starts),
+                    "validated_visto": len(validated),
+                    "processed": split_summary.exported,
+                    "skipped_existing": split_summary.skipped_existing,
+                    "output_dir": output_dir,
+                    "idempotent": skip_existing,
+                    "page_marker_pattern": page_marker_pattern,
+                }
+                st.session_state["split_rgs_summary"] = payload
+                st.success("Split RGs completado.")
+                st.json(payload)
+                c1, c2 = st.columns(2)
+                c1.metric("RGs detectadas", payload["detected"])
+                c2.metric("RGs procesadas", payload["processed"])
+            except ValueError as exc:
+                st.error(f"Formato de página inválido: {exc}")
 
     latest_split = st.session_state.get("split_rgs_summary")
     if latest_split:
