@@ -967,3 +967,26 @@ def test_run_citations_reports_progress(monkeypatch, tmp_path: Path):
     assert events
     assert events[0]["stage"] == "docs"
     assert any(event.get("stage") == "llm" for event in events)
+
+
+def test_insert_review_skips_when_citation_no_longer_exists(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        inserted = citations_service._insert_review(  # noqa: SLF001
+            conn,
+            citation_id=123456,
+            model="test-model",
+            prompt_version="citref-v5",
+            review={
+                "is_reference": True,
+                "norm_type": "LEY",
+                "normalized_key": "LEY-83-F",
+                "confidence": 0.9,
+                "explanation": "reference",
+            },
+        )
+
+    assert inserted is False

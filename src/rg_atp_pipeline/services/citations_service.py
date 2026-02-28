@@ -1070,7 +1070,10 @@ def _insert_review(
             explanation,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+            SELECT 1 FROM citations c WHERE c.citation_id = ?
+        )
         """,
         (
             citation_id,
@@ -1082,6 +1085,7 @@ def _insert_review(
             review["confidence"],
             review["explanation"],
             now,
+            citation_id,
         ),
     )
     return cursor.rowcount == 1

@@ -7,6 +7,23 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
+class SafeRotatingFileHandler(RotatingFileHandler):
+    """Rotating handler resilient to Windows file-lock rollover issues."""
+
+    def doRollover(self) -> None:  # noqa: N802 - stdlib signature
+        try:
+            super().doRollover()
+        except PermissionError:
+            if self.stream:
+                try:
+                    self.stream.close()
+                except OSError:
+                    pass
+                self.stream = None
+            if not self.delay:
+                self.stream = self._open()
+
+
 def setup_logging(log_dir: Path, level: int = logging.INFO) -> logging.Logger:
     """Configure logging to console and rotating file."""
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -25,7 +42,7 @@ def setup_logging(log_dir: Path, level: int = logging.INFO) -> logging.Logger:
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
 
-    file_handler = RotatingFileHandler(
+    file_handler = SafeRotatingFileHandler(
         log_path,
         maxBytes=1_000_000,
         backupCount=3,
