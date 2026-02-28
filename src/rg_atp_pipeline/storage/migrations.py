@@ -580,4 +580,40 @@ def ensure_schema(db_path: Path) -> None:
             "CREATE INDEX IF NOT EXISTS idx_relation_extractions_relation_type "
             "ON relation_extractions(relation_type)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intra_norm_relations (
+                intra_relation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_doc_key TEXT NOT NULL,
+                source_unit_id INTEGER NOT NULL,
+                source_unit_number TEXT,
+                target_unit_id INTEGER NOT NULL,
+                target_unit_number TEXT,
+                relation_type TEXT NOT NULL,
+                evidence_snippet TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                method TEXT NOT NULL,
+                extract_version TEXT NOT NULL DEFAULT 'relext-v2',
+                created_at TEXT NOT NULL,
+                UNIQUE(
+                    source_doc_key,
+                    source_unit_id,
+                    target_unit_id,
+                    relation_type,
+                    method,
+                    extract_version
+                ),
+                FOREIGN KEY(source_unit_id) REFERENCES units(id),
+                FOREIGN KEY(target_unit_id) REFERENCES units(id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intra_norm_relations_doc_key "
+            "ON intra_norm_relations(source_doc_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intra_norm_relations_target_unit "
+            "ON intra_norm_relations(target_unit_id)"
+        )
         conn.commit()
