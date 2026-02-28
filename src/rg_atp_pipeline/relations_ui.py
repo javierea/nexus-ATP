@@ -22,6 +22,7 @@ def run_relations_ui(
     ollama_base_url: str | None,
     only_structured: bool = False,
     extract_version: str = "relext-v2",
+    citation_extract_version: str | None = None,
 ) -> dict[str, Any]:
     """Execute Stage 4.1 relation extraction and return summary payload."""
     effective_batch_size = int(batch_size) if batch_size is not None else 20
@@ -38,6 +39,7 @@ def run_relations_ui(
         ollama_base_url=ollama_base_url,
         only_structured=only_structured,
         extract_version=extract_version,
+        citation_extract_version=citation_extract_version,
     )
 
 

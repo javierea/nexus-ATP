@@ -24,6 +24,7 @@ from .services.citations_service import (
     run_citations,
 )
 from .services.relations_service import run_relations
+from .services.graphrag_validation import run_graphrag_validation
 from .services.norm_seed import seed_norms_from_yaml
 from .services.seed_common_aliases import seed_common_aliases
 from .services.norm_merge import merge_norm
@@ -380,6 +381,7 @@ def citations(
         prompt_version=prompt_version,
         only_structured=only_structured,
         extract_version=extract_version,
+        citation_extract_version=citation_extract_version,
     )
     typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
 
@@ -443,6 +445,11 @@ def relations(
         "--extract-version",
         help="Versión de extracción base para relaciones.",
     ),
+    citation_extract_version: str | None = typer.Option(
+        None,
+        "--citation-extract-version",
+        help="Filtrar Stage 4.1 por citations.extract_version (default: última versión detectada).",
+    ),
 ) -> None:
     """Type normative relations from extracted citation links (Etapa 4.1)."""
     setup_logging(data_dir() / "logs")
@@ -461,9 +468,35 @@ def relations(
         ollama_base_url=ollama_base_url,
         only_structured=only_structured,
         extract_version=extract_version,
+        citation_extract_version=citation_extract_version,
     )
     typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
 
+
+
+
+@app.command("graphrag-validate")
+def graphrag_validate(
+    relation_extract_version: str | None = typer.Option(
+        None,
+        "--relation-extract-version",
+        help="Filtrar validación por relation_extractions.extract_version (default: última versión).",
+    ),
+    citation_extract_version: str | None = typer.Option(
+        None,
+        "--citation-extract-version",
+        help="Filtrar validación por citations.extract_version.",
+    ),
+) -> None:
+    """Run GraphRAG-ready KPI and business-query validation suite."""
+    setup_logging(data_dir() / "logs")
+    init_project()
+    summary = run_graphrag_validation(
+        db_path=data_dir() / "state" / "rg_atp.sqlite",
+        relation_extract_version=relation_extract_version,
+        citation_extract_version=citation_extract_version,
+    )
+    typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
 
 @app.command("seed-norms")
 def seed_norms() -> None:

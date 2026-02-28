@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -66,6 +67,7 @@ def run_relations(
     ollama_base_url: str | None = None,
     only_structured: bool = False,
     extract_version: str = "relext-v2",
+    citation_extract_version: str | None = None,
 ) -> dict[str, Any]:
     """Run relation typing from existing citations and links."""
     ensure_schema(db_path)
@@ -104,6 +106,7 @@ def run_relations(
     empty_response_now = 0
     missing_result_now = 0
     batches_unparsable_now = 0
+    intra_norm_relations_inserted = 0
 
     logger.info(
         "Stage 4.1 LLM config: llm_mode=%r threshold/min_confidence=%s batch_size=%s prompt_version=%s model=%s",
@@ -132,10 +135,16 @@ def run_relations(
                     """
                 ).fetchall()
             ]
-        rows = _load_citation_links(conn, doc_keys=doc_keys, limit_docs=limit_docs)
+        rows, effective_citation_extract_version = _load_citation_links(
+            conn,
+            doc_keys=doc_keys,
+            limit_docs=limit_docs,
+            citation_extract_version=citation_extract_version,
+        )
         docs_processed = len({row["source_doc_key"] for row in rows})
         pending_llm: list[dict[str, Any]] = []
         units_cache: dict[str, dict[str, StructuredUnit]] = {}
+        units_seen_for_intra: dict[tuple[str, int], dict[str, Any]] = {}
 
         index_sql = _get_relation_unique_index_sql(conn)
         if index_sql:
@@ -148,6 +157,14 @@ def run_relations(
             if doc_key not in units_cache:
                 units_cache[doc_key] = _load_structured_units(data_dir, doc_key)
             text = _build_local_text(row, units_cache[doc_key])
+            source_unit_id = _safe_int(row["source_unit_id"])
+            if source_unit_id is not None and text:
+                units_seen_for_intra[(doc_key, source_unit_id)] = {
+                    "source_doc_key": doc_key,
+                    "source_unit_id": source_unit_id,
+                    "source_unit_number": row["source_unit_number"],
+                    "unit_text": text,
+                }
             candidates = extract_relation_candidates(text)
             total_candidates_detected += len(candidates)
             for candidate in candidates:
@@ -478,6 +495,16 @@ def run_relations(
                     ):
                         inserted_according_to_with_target_now += 1
 
+        for unit in units_seen_for_intra.values():
+            intra_norm_relations_inserted += _materialize_intra_norm_relations(
+                conn,
+                source_doc_key=str(unit["source_doc_key"]),
+                source_unit_id=int(unit["source_unit_id"]),
+                source_unit_number=unit["source_unit_number"],
+                unit_text=str(unit["unit_text"]),
+                extract_version=extract_version,
+            )
+
         unknown_count = by_type_inserted.get("UNKNOWN", 0)
         logger.info(
             "Stage 4.1 LLM: batches_sent=%s llm_verified=%s ok_reviews_now=%s parse_error_now=%s invalid_id_now=%s invalid_response_now=%s empty_response_now=%s missing_result_now=%s batches_unparsable_now=%s",
@@ -526,6 +553,8 @@ def run_relations(
         "empty_response_now": empty_response_now,
         "missing_result_now": missing_result_now,
         "batches_unparsable_now": batches_unparsable_now,
+        "citation_extract_version_effective": effective_citation_extract_version,
+        "intra_norm_relations_inserted": intra_norm_relations_inserted,
     }
 
 
@@ -564,9 +593,21 @@ def _load_citation_links(
     conn: sqlite3.Connection,
     doc_keys: list[str] | None,
     limit_docs: int | None,
-) -> list[sqlite3.Row]:
+    citation_extract_version: str | None,
+) -> tuple[list[sqlite3.Row], str | None]:
     where = ["l.resolution_status IN ('RESOLVED', 'PLACEHOLDER_CREATED')"]
     params: list[Any] = []
+    effective_extract_version = None
+    latest_extract_row = conn.execute(
+        "SELECT extract_version FROM citations ORDER BY detected_at DESC, citation_id DESC LIMIT 1"
+    ).fetchone()
+    if latest_extract_row and latest_extract_row[0] is not None:
+        effective_extract_version = str(latest_extract_row[0])
+    if citation_extract_version:
+        effective_extract_version = str(citation_extract_version).strip()
+    if effective_extract_version:
+        where.append("c.extract_version = ?")
+        params.append(effective_extract_version)
     if doc_keys:
         where.append(f"c.source_doc_key IN ({','.join('?' for _ in doc_keys)})")
         params.extend(doc_keys)
@@ -581,7 +622,7 @@ def _load_citation_links(
     )
     rows = conn.execute(query, params).fetchall()
     if limit_docs is None:
-        return rows
+        return rows, effective_extract_version
     accepted_docs: set[str] = set()
     limited: list[sqlite3.Row] = []
     for row in rows:
@@ -590,8 +631,85 @@ def _load_citation_links(
             continue
         accepted_docs.add(key)
         limited.append(row)
-    return limited
+    return limited, effective_extract_version
 
+
+_INTRA_ARTICLE_REF_RE = re.compile(r"\b(?:art\.?|artículo|arts\.?)\s*(\d+[\w°º]*)", re.IGNORECASE)
+
+
+def _materialize_intra_norm_relations(
+    conn: sqlite3.Connection,
+    source_doc_key: str,
+    source_unit_id: int,
+    source_unit_number: Any,
+    unit_text: str,
+    extract_version: str,
+) -> int:
+    matches = list(_INTRA_ARTICLE_REF_RE.finditer(unit_text or ""))
+    if not matches:
+        return 0
+    inserted = 0
+    source_unit_number_str = str(source_unit_number or "").strip().upper().replace("º", "").replace("°", "")
+    now = datetime.now(timezone.utc).isoformat()
+    for match in matches:
+        target_number = match.group(1).strip().upper().replace("º", "").replace("°", "")
+        if not target_number or target_number == source_unit_number_str:
+            continue
+        target_unit = conn.execute(
+            """
+            SELECT id, unit_number
+            FROM units
+            WHERE doc_key = ?
+              AND unit_type = 'ARTICULO'
+              AND UPPER(REPLACE(REPLACE(COALESCE(unit_number, ''), 'º', ''), '°', '')) = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (source_doc_key, target_number),
+        ).fetchone()
+        if not target_unit:
+            continue
+        cur = conn.execute(
+            """
+            INSERT INTO intra_norm_relations (
+                source_doc_key,
+                source_unit_id,
+                source_unit_number,
+                target_unit_id,
+                target_unit_number,
+                relation_type,
+                evidence_snippet,
+                confidence,
+                method,
+                extract_version,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                source_doc_key,
+                source_unit_id,
+                source_unit_number,
+                int(target_unit["id"]),
+                target_unit["unit_number"],
+                "REFERS_INTERNAL_ARTICLE",
+                _build_local_evidence(unit_text, match.start(), match.end()),
+                0.75,
+                "REGEX",
+                extract_version,
+                now,
+            ),
+        )
+        if cur.rowcount:
+            inserted += 1
+    return inserted
+
+
+
+def _build_local_evidence(text: str, start: int, end: int, window: int = 80) -> str:
+    left = max(0, start - window)
+    right = min(len(text), end + window)
+    return text[left:right].strip()
 
 def _build_local_text(
     row: sqlite3.Row,
