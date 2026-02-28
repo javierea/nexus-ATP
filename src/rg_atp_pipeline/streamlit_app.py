@@ -33,6 +33,7 @@ from rg_atp_pipeline.state import load_state
 from rg_atp_pipeline.storage_sqlite import DocumentStore
 from rg_atp_pipeline.structure_ui import run_structure_ui
 from rg_atp_pipeline.text_extractor import ExtractOptions, run_extract
+from rg_atp_pipeline.rg_detector import detect_rg_starts, export_rg_splits
 from rg_atp_pipeline.audit_compendio import (
     review_missing_downloads,
     run_audit_compendio,
@@ -820,6 +821,66 @@ def render_extract(db_path: Path, store: DocumentStore, logger: logging.Logger) 
             summary = run_extract(config, store, data_dir(), options, logger)
         st.success(f"Extracción completada: {summary.as_dict()}")
         st.cache_data.clear()
+
+    st.divider()
+    st.subheader("Split RGs (post-extract / pre-structure)")
+    with st.form("split_rgs_form"):
+        input_text = st.text_input(
+            "TXT de entrada",
+            value=str(data_dir() / "text" / "COMPENDIO-2024.txt"),
+            help="Archivo TXT generado por extract con marcadores ===PAGE N===.",
+        )
+        output_dir = st.text_input(
+            "Directorio salida",
+            value=str(data_dir() / "pre_structure"),
+        )
+        logical_page_offset = st.number_input(
+            "Logical page offset",
+            min_value=0,
+            value=45,
+            step=1,
+            help="Ej: si índice pág. 1 coincide con PDF pág. 46, usar 45.",
+        )
+        skip_existing = st.checkbox("Idempotente (skip existing)", value=True)
+        split_submit = st.form_submit_button("Ejecutar split-rgs")
+
+    if split_submit:
+        input_path = Path(input_text)
+        if not input_path.exists():
+            st.error(f"No existe TXT de entrada: {input_path}")
+        else:
+            raw_text = input_path.read_text(encoding="utf-8")
+            starts = detect_rg_starts(raw_text, logical_page_offset=int(logical_page_offset))
+            validated = [item for item in starts if item.visto_found]
+            with st.spinner("Separando RGs..."):
+                split_summary = export_rg_splits(
+                    raw_text,
+                    Path(output_dir),
+                    logical_page_offset=int(logical_page_offset),
+                    skip_existing=skip_existing,
+                )
+            payload = {
+                "detected": len(starts),
+                "validated_visto": len(validated),
+                "processed": split_summary.exported,
+                "skipped_existing": split_summary.skipped_existing,
+                "output_dir": output_dir,
+                "idempotent": skip_existing,
+            }
+            st.session_state["split_rgs_summary"] = payload
+            st.success("Split RGs completado.")
+            st.json(payload)
+            c1, c2 = st.columns(2)
+            c1.metric("RGs detectadas", payload["detected"])
+            c2.metric("RGs procesadas", payload["processed"])
+
+    latest_split = st.session_state.get("split_rgs_summary")
+    if latest_split:
+        st.caption("Último run split-rgs")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Detectadas", latest_split.get("detected", 0))
+        c2.metric("Procesadas", latest_split.get("processed", 0))
+        c3.metric("Skip existing", latest_split.get("skipped_existing", 0))
 
     st.subheader("Documentos")
     filters = cached_filters(str(db_path))
