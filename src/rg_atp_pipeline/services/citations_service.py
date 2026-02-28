@@ -335,7 +335,8 @@ def run_citations(
                                 exc,
                                 citation_id=citation_id,
                             )
-                            raise
+                            errors += 1
+                            continue
                         except sqlite3.OperationalError as exc:
                             _log_operational_error(
                                 logger,
@@ -343,7 +344,8 @@ def run_citations(
                                 exc,
                                 citation_id=citation_id,
                             )
-                            raise
+                            errors += 1
+                            continue
                         if inserted:
                             reviews_inserted_now += 1
                         reviews[citation_id] = review
@@ -1001,7 +1003,9 @@ def _candidate_payload(citation: CitationPayload) -> dict[str, Any]:
 def _get_citation_evidence_text(citation: CitationPayload) -> str:
     return citation.evidence_text or citation.candidate.evidence_snippet
 
-def _normalize_review(result: dict[str, Any]) -> dict[str, Any] | None:
+def _normalize_review(result: Any) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
     candidate_id = result.get("candidate_id")
     if candidate_id is None:
         return None
@@ -1056,6 +1060,8 @@ def _insert_review(
     prompt_version: str,
     review: dict[str, Any],
 ) -> bool:
+    if not _citation_exists(conn, citation_id):
+        return False
     now = _utc_now()
     cursor = conn.execute(
         """
@@ -1089,6 +1095,14 @@ def _insert_review(
         ),
     )
     return cursor.rowcount == 1
+
+
+def _citation_exists(conn: sqlite3.Connection, citation_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM citations WHERE citation_id = ?",
+        (citation_id,),
+    ).fetchone()
+    return row is not None
 
 
 def _has_review(

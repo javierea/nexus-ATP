@@ -497,6 +497,10 @@ def test_hardening_explanation_with_string_values():
     assert review["confidence"] == 0.99
 
 
+def test_normalize_review_returns_none_for_non_dict_payload():
+    assert _normalize_review("not-a-dict") is None
+
+
 def test_parse_bool():
     assert parse_bool("false") is False
     assert parse_bool("0") is False
