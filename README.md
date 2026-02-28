@@ -55,6 +55,7 @@ python -m rg_atp_pipeline fetch --mode both --skip-existing
 python -m rg_atp_pipeline extract --status DOWNLOADED --limit 50
 python -m rg_atp_pipeline extract --doc-key RG-2024-001 --force
 python -m rg_atp_pipeline extract --only-needs-ocr
+python -m rg_atp_pipeline split-rgs --input-text data/text/COMPENDIO-2024.txt --logical-page-offset 45
 python -m rg_atp_pipeline structure --limit 50
 python -m rg_atp_pipeline structure --doc-key RG-2024-001 --force
 python -m rg_atp_pipeline structure --include-needs-ocr --no-export-json
@@ -80,6 +81,7 @@ python -m rg_atp_pipeline ui-streamlit --host 127.0.0.1 --port 8501
 - `fetch` realiza HEAD/GET según configuración, guarda PDFs versionados en `data/raw_pdfs/` y actualiza SQLite en `data/state/rg_atp.sqlite`.
 - `fetch` puede omitir entradas ya descargadas con `--skip-existing` si el PDF local sigue disponible.
 - `extract` genera texto crudo por página en `data/text/`, calcula métricas y marca `NEEDS_OCR` cuando corresponde.
+- `split-rgs` (post-extract / pre-structure) detecta inicios de RG por encabezado (`RESOLUCIÓN GENERAL Nº ...`) y valida con `VISTO:` o `VISTO Y CONSIDERANDO`, exportando bloques individuales a `data/pre_structure/`. Soporta numeración `XXXX`, `XXXX/AA` y `XXXX/AAAA`, y offset de páginas lógicas del índice (ej. índice 1 = PDF 46 => `--logical-page-offset 45`).
 - `structure` segmenta el texto crudo en unidades normativas (ARTÍCULO/ANEXO/secciones) y guarda unidades en SQLite, con export JSON opcional en `data/structured/`.
 - `audit-compendio` extrae referencias a RG desde el compendio legislativo, normaliza claves (`RES-AAAA-NN-20-1` u `OLD-N`) y exporta CSV/JSON en `data/audit/` con comparación contra `data/state/rg_atp.sqlite`. También genera `missing_downloads_*.csv` y soporta `--only-missing-downloads` para exportar únicamente ese listado.
 - `seed-norms` carga el catálogo inicial de normas y aliases desde `data/state/seeds/norms.yml`.

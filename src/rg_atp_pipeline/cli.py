@@ -33,6 +33,7 @@ from .storage_sqlite import DocumentStore
 from .state import State, load_state
 from .structure_segmenter import StructureOptions, run_structure
 from .text_extractor import ExtractOptions, run_extract
+from .rg_detector import detect_rg_starts, export_rg_splits
 from .web_ui import run_ui
 
 app = typer.Typer(help="rg_atp_pipeline CLI (Etapa 3)")
@@ -171,6 +172,56 @@ def extract(
     typer.echo(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
 
 
+
+
+@app.command("split-rgs")
+def split_rgs(
+    input_text: str = typer.Option(..., "--input-text", help="Ruta al TXT generado por extract."),
+    output_dir: str = typer.Option(
+        str(data_dir() / "pre_structure"),
+        "--output-dir",
+        help="Directorio de salida para RGs separadas.",
+    ),
+    logical_page_offset: int = typer.Option(
+        0,
+        "--logical-page-offset",
+        help=("Offset para mapear página lógica del índice vs página real del PDF. "
+              "Ej: índice 1 = PDF 46 => offset 45."),
+    ),
+    skip_existing: bool = typer.Option(
+        True,
+        "--skip-existing/--no-skip-existing",
+        help="No sobreescribir RGs ya exportadas.",
+    ),
+) -> None:
+    """Separar múltiples RGs desde texto extraído (post-extract, pre-structure)."""
+    raw_path = Path(input_text)
+    if not raw_path.exists():
+        typer.secho(f"No existe input_text: {raw_path}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    raw_text = raw_path.read_text(encoding="utf-8")
+    starts = detect_rg_starts(raw_text, logical_page_offset=logical_page_offset)
+    validated = [item for item in starts if item.visto_found]
+    summary = export_rg_splits(
+        raw_text,
+        Path(output_dir),
+        logical_page_offset=logical_page_offset,
+        skip_existing=skip_existing,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "starts_detected": len(starts),
+                "starts_validated_visto": len(validated),
+                "exported": summary.exported,
+                "skipped_existing": summary.skipped_existing,
+                "output_dir": output_dir,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
 @app.command("audit-compendio")
 def audit_compendio(
     pdf_path: str = typer.Option(
