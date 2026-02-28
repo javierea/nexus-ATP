@@ -114,26 +114,48 @@ def render_citations_stage(db_path: Path) -> None:
     limit_docs_value = _parse_optional_int(limit_docs)
 
     if submitted:
+        progress_text = st.empty()
+        progress_bar = st.progress(0.0)
+
+        def _on_progress(payload: dict[str, Any]) -> None:
+            stage = str(payload.get("stage") or "")
+            current = int(payload.get("current") or 0)
+            total = max(1, int(payload.get("total") or 1))
+            message = str(payload.get("message") or "")
+            if stage == "docs":
+                ratio = (current / total) * 0.8
+            elif stage == "llm":
+                ratio = 0.8 + ((current / total) * 0.2)
+            else:
+                ratio = current / total
+            progress_bar.progress(min(1.0, max(0.0, ratio)))
+            if message:
+                progress_text.caption(message)
+
         try:
-            with st.spinner("Ejecutando Etapa 4..."):
-                summary = run_citations(
-                    db_path=db_path,
-                    data_dir=data_root,
-                    doc_keys=doc_keys,
-                    limit_docs=limit_docs_value,
-                    llm_mode=llm_mode,
-                    min_confidence=min_confidence,
-                    create_placeholders=create_placeholders,
-                    batch_size=int(batch_size) if llm_mode in {"verify", "verify_all"} else None,
-                    ollama_model=ollama_model if llm_mode in {"verify", "verify_all"} else None,
-                    ollama_base_url=ollama_base_url if llm_mode in {"verify", "verify_all"} else None,
-                    prompt_version=prompt_version,
-                    llm_gate_regex_threshold=llm_gate_regex_threshold,
-                    extract_version=extract_version,
-                )
+            summary = run_citations(
+                db_path=db_path,
+                data_dir=data_root,
+                doc_keys=doc_keys,
+                limit_docs=limit_docs_value,
+                llm_mode=llm_mode,
+                min_confidence=min_confidence,
+                create_placeholders=create_placeholders,
+                batch_size=int(batch_size) if llm_mode in {"verify", "verify_all"} else None,
+                ollama_model=ollama_model if llm_mode in {"verify", "verify_all"} else None,
+                ollama_base_url=ollama_base_url if llm_mode in {"verify", "verify_all"} else None,
+                prompt_version=prompt_version,
+                llm_gate_regex_threshold=llm_gate_regex_threshold,
+                extract_version=extract_version,
+                progress_callback=_on_progress,
+            )
         except Exception as exc:  # noqa: BLE001 - show runtime errors.
+            progress_bar.empty()
+            progress_text.empty()
             st.error(f"Error al ejecutar Etapa 4: {exc}")
         else:
+            progress_bar.progress(1.0)
+            progress_text.caption("Etapa 4 finalizada.")
             st.session_state["citations_summary"] = summary
             st.session_state["citations_doc_keys"] = doc_keys
             st.success("Etapa 4 completada.")

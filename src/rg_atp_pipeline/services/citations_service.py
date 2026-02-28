@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rg_atp_pipeline.config import load_config
 from rg_atp_pipeline.paths import config_path
@@ -81,6 +81,7 @@ def run_citations(
     llm_timeout_sec: int | None = None,
     only_structured: bool = False,
     extract_version: str = "citext-v2",
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run citation extraction and normalization."""
     ensure_schema(db_path)
@@ -130,6 +131,13 @@ def run_citations(
     rejected_by_llm_now = 0
 
     citations: list[CitationPayload] = []
+    _emit_progress(
+        progress_callback,
+        stage="docs",
+        current=0,
+        total=len(available_docs),
+        message="Iniciando extracción de citas.",
+    )
     conn = _connect(db_path, logger)
     try:
         repo = NormsRepository(conn=conn)
@@ -152,7 +160,7 @@ def run_citations(
         docs_since_commit = 0
         commit_every = 50
         with conn:
-            for doc_key in available_docs:
+            for doc_index, doc_key in enumerate(available_docs, start=1):
                 units = _load_units(data_dir, doc_key, logger)
                 if not units:
                     logger.warning("Sin texto disponible para %s.", doc_key)
@@ -218,6 +226,13 @@ def run_citations(
                             )
                         )
                 docs_since_commit += 1
+                _emit_progress(
+                    progress_callback,
+                    stage="docs",
+                    current=doc_index,
+                    total=len(available_docs),
+                    message=f"Procesando documento {doc_index}/{len(available_docs)}: {doc_key}",
+                )
                 if docs_since_commit >= commit_every:
                     conn.commit()
                     logger.info(
@@ -274,6 +289,7 @@ def run_citations(
                 )
                 for batch in _chunked(gated, batch_size):
                     llm_batches_sent += 1
+                    expected_citation_ids = {item.citation_id for item in batch}
                     payload = [
                         _candidate_payload(item)
                         for item in batch
@@ -295,6 +311,14 @@ def run_citations(
                         if not review:
                             continue
                         citation_id = review["citation_id"]
+                        if citation_id not in expected_citation_ids:
+                            logger.warning(
+                                "Stage 4 invalid candidate_id from LLM payload: expected=%s got=%s preview=%r",
+                                sorted(expected_citation_ids),
+                                citation_id,
+                                str(result)[:400],
+                            )
+                            continue
                         try:
                             inserted = _insert_review(
                                 conn,
@@ -323,6 +347,13 @@ def run_citations(
                         if inserted:
                             reviews_inserted_now += 1
                         reviews[citation_id] = review
+                    _emit_progress(
+                        progress_callback,
+                        stage="llm",
+                        current=llm_batches_sent,
+                        total=max(1, (len(gated) + batch_size - 1) // batch_size),
+                        message=f"Verificación LLM batch {llm_batches_sent}/{max(1, (len(gated) + batch_size - 1) // batch_size)}",
+                    )
 
             for citation in citations:
                 review = reviews.get(citation.citation_id)
@@ -576,6 +607,15 @@ def run_citations(
         "llm_overruled_by_deterministic_now": llm_overruled_by_deterministic_now,
         "rejected_by_llm_now": rejected_by_llm_now,
     }
+
+
+def _emit_progress(
+    callback: Callable[[dict[str, Any]], None] | None,
+    **payload: Any,
+) -> None:
+    if callback is None:
+        return
+    callback(payload)
 
 
 def normalize_rejected_links_semantics(db_path: Path) -> dict[str, Any]:
@@ -1030,7 +1070,10 @@ def _insert_review(
             explanation,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+            SELECT 1 FROM citations c WHERE c.citation_id = ?
+        )
         """,
         (
             citation_id,
@@ -1042,6 +1085,7 @@ def _insert_review(
             review["confidence"],
             review["explanation"],
             now,
+            citation_id,
         ),
     )
     return cursor.rowcount == 1

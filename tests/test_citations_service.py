@@ -876,3 +876,117 @@ def test_deterministic_alias_resolution_overrides_negative_llm_for_ctp(
     assert row is not None
     assert row["resolution_status"] == "RESOLVED"
     assert row["target_norm_key"] == "LEY-83-F"
+
+
+def test_verify_ignores_out_of_batch_candidate_ids(monkeypatch, tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-020"
+    (raw_text_dir / f"{doc_key}.txt").write_text("Ley 83-F.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    def fake_verify_candidates(payload, **_kwargs):
+        return [
+            {
+                "candidate_id": "999999",
+                "is_reference": True,
+                "norm_type": "LEY",
+                "normalized_key": "LEY-83-F",
+                "confidence": 0.95,
+                "explanation": "reference",
+            },
+            {
+                "candidate_id": payload[0]["candidate_id"],
+                "is_reference": True,
+                "norm_type": "LEY",
+                "normalized_key": "LEY-83-F",
+                "confidence": 0.95,
+                "explanation": "reference",
+            },
+        ]
+
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    summary = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="verify_all",
+        min_confidence=0.7,
+        create_placeholders=False,
+        batch_size=1,
+    )
+
+    assert summary["errors"] == 0
+    assert summary["reviews_inserted_now"] == 1
+
+
+def test_run_citations_reports_progress(monkeypatch, tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    for idx in (1, 2):
+        (raw_text_dir / f"RG-2024-0{idx}.txt").write_text("Ley 83-F.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    def fake_verify_candidates(payload, **_kwargs):
+        return [
+            {
+                "candidate_id": item["candidate_id"],
+                "is_reference": True,
+                "norm_type": "LEY",
+                "normalized_key": item.get("norm_key_candidate") or "LEY-83-F",
+                "confidence": 0.95,
+                "explanation": "reference",
+            }
+            for item in payload
+        ]
+
+    events: list[dict[str, object]] = []
+
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=None,
+        limit_docs=2,
+        llm_mode="verify_all",
+        min_confidence=0.7,
+        create_placeholders=False,
+        batch_size=1,
+        progress_callback=events.append,
+    )
+
+    assert events
+    assert events[0]["stage"] == "docs"
+    assert any(event.get("stage") == "llm" for event in events)
+
+
+def test_insert_review_skips_when_citation_no_longer_exists(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        inserted = citations_service._insert_review(  # noqa: SLF001
+            conn,
+            citation_id=123456,
+            model="test-model",
+            prompt_version="citref-v5",
+            review={
+                "is_reference": True,
+                "norm_type": "LEY",
+                "normalized_key": "LEY-83-F",
+                "confidence": 0.9,
+                "explanation": "reference",
+            },
+        )
+
+    assert inserted is False
