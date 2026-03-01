@@ -1255,7 +1255,9 @@ def _update_relation_with_review(
     source = conn.execute(
         """
         SELECT relation_id, citation_id, link_id, method,
-               relation_type, scope, scope_detail
+               relation_type, scope, scope_detail,
+               source_doc_key, source_unit_id, target_norm_key,
+               confidence, explanation
         FROM relation_extractions
         WHERE relation_id = ?
         """,
@@ -1289,24 +1291,97 @@ def _update_relation_with_review(
     ).fetchone()
 
     if existing is None:
-        conn.execute(
-            """
-            UPDATE relation_extractions
-            SET relation_type = ?, direction = ?, scope = ?, scope_detail = ?,
-                confidence = ?, explanation = ?
-            WHERE relation_id = ?
-            """,
-            (
-                review["relation_type"],
-                review["direction"],
-                review["scope"],
-                review["scope_detail"],
-                review["confidence"],
-                review["explanation"],
-                relation_id,
-            ),
-        )
-        return False
+        try:
+            conn.execute(
+                """
+                UPDATE relation_extractions
+                SET relation_type = ?, direction = ?, scope = ?, scope_detail = ?,
+                    confidence = ?, explanation = ?
+                WHERE relation_id = ?
+                """,
+                (
+                    review["relation_type"],
+                    review["direction"],
+                    review["scope"],
+                    review["scope_detail"],
+                    review["confidence"],
+                    review["explanation"],
+                    relation_id,
+                ),
+            )
+            return False
+        except sqlite3.IntegrityError:
+            legacy_collision = conn.execute(
+                """
+                SELECT relation_id, confidence, explanation
+                FROM relation_extractions
+                WHERE source_doc_key = ?
+                  AND source_unit_id = ?
+                  AND COALESCE(target_norm_key, '') = COALESCE(?, '')
+                  AND relation_type = ?
+                  AND relation_id <> ?
+                ORDER BY created_at DESC, relation_id DESC
+                LIMIT 1
+                """,
+                (
+                    source["source_doc_key"],
+                    _safe_int(source["source_unit_id"]),
+                    source["target_norm_key"],
+                    review["relation_type"],
+                    relation_id,
+                ),
+            ).fetchone()
+            if legacy_collision is None:
+                raise
+
+            merged_confidence = max(
+                float(legacy_collision["confidence"] or 0.0),
+                float(source["confidence"] or 0.0),
+                float(review["confidence"] or 0.0),
+            )
+            merged_explanation = (
+                str(review.get("explanation") or "").strip()
+                or str(legacy_collision["explanation"] or "").strip()
+                or str(source["explanation"] or "").strip()
+            )
+            conn.execute(
+                """
+                UPDATE relation_extractions
+                SET direction = ?,
+                    scope = ?,
+                    scope_detail = ?,
+                    confidence = ?,
+                    explanation = ?
+                WHERE relation_id = ?
+                """,
+                (
+                    review["direction"],
+                    review["scope"],
+                    review["scope_detail"],
+                    merged_confidence,
+                    merged_explanation,
+                    legacy_collision["relation_id"],
+                ),
+            )
+
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO relation_llm_reviews (
+                    relation_id, llm_model, prompt_version,
+                    relation_type, direction, scope, scope_detail,
+                    llm_confidence, explanation, status, raw_response, raw_item, created_at
+                )
+                SELECT ?, llm_model, prompt_version,
+                       relation_type, direction, scope, scope_detail,
+                       llm_confidence, explanation, status, raw_response, raw_item, created_at
+                FROM relation_llm_reviews
+                WHERE relation_id = ?
+                """,
+                (legacy_collision["relation_id"], relation_id),
+            )
+            conn.execute("DELETE FROM relation_llm_reviews WHERE relation_id = ?", (relation_id,))
+            deleted = _delete_relation_extraction(conn, relation_id)
+            return deleted
 
     merged_confidence = max(float(existing["confidence"] or 0.0), float(review["confidence"] or 0.0))
     llm_explanation = str(review.get("explanation") or "").strip()

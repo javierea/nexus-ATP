@@ -3,7 +3,11 @@ import json
 from pathlib import Path
 
 from rg_atp_pipeline.services.relation_extractor import RelationCandidate
-from rg_atp_pipeline.services.relations_service import _insert_relation_extraction, run_relations
+from rg_atp_pipeline.services.relations_service import (
+    _insert_relation_extraction,
+    _update_relation_with_review,
+    run_relations,
+)
 from rg_atp_pipeline.storage.migrations import ensure_schema
 
 
@@ -1607,3 +1611,113 @@ def test_insert_relation_extraction_handles_legacy_unit_index_collisions(tmp_pat
 
         count = conn.execute("SELECT COUNT(*) FROM relation_extractions").fetchone()[0]
         assert count == 1
+
+
+def test_update_relation_with_review_merges_on_legacy_unit_unique_collision(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("DROP INDEX IF EXISTS ux_relation_extractions_unit_target_type")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX ux_relation_extractions_unit_target_type
+            ON relation_extractions(
+                source_doc_key,
+                source_unit_id,
+                COALESCE(target_norm_key, ''),
+                relation_type
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, source_unit_id, source_unit_number,
+                source_unit_text, target_norm_key, extract_version,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet,
+                explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                1,
+                "RG-LEGACY-2",
+                10,
+                "10",
+                "Texto unit",
+                "LEY-X",
+                "relext-v2",
+                "REPEALS",
+                "SOURCE_TO_TARGET",
+                "ARTICLE",
+                "1",
+                "MIXED",
+                0.6,
+                "",
+                "",
+                "seed repeals",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        relation_id_to_update = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, source_unit_id, source_unit_number,
+                source_unit_text, target_norm_key, extract_version,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet,
+                explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                2,
+                2,
+                "RG-LEGACY-2",
+                10,
+                "10",
+                "Texto unit",
+                "LEY-X",
+                "relext-v2",
+                "MODIFIES",
+                "SOURCE_TO_TARGET",
+                "WHOLE_NORM",
+                "",
+                "MIXED",
+                0.7,
+                "",
+                "",
+                "seed modifies",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        relation_id_existing = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        merged = _update_relation_with_review(
+            conn,
+            relation_id=relation_id_to_update,
+            review={
+                "relation_type": "MODIFIES",
+                "direction": "SOURCE_TO_TARGET",
+                "scope": "ARTICLE",
+                "scope_detail": "2",
+                "confidence": 0.91,
+                "explanation": "LLM corrected",
+            },
+        )
+        assert merged is True
+
+        rows = conn.execute(
+            "SELECT relation_id, relation_type, scope, scope_detail, confidence, explanation FROM relation_extractions ORDER BY relation_id"
+        ).fetchall()
+
+    assert len(rows) == 1
+    assert rows[0][0] == relation_id_existing
+    assert rows[0][1] == "MODIFIES"
+    assert rows[0][2] == "ARTICLE"
+    assert rows[0][3] == "2"
+    assert rows[0][4] == 0.91
+    assert rows[0][5] == "LLM corrected"
