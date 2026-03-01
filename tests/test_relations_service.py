@@ -1533,3 +1533,77 @@ def test_relations_service_llm_candidate_id_must_be_literal(tmp_path: Path, monk
     )
 
     assert summary["invalid_id_now"] >= 1
+
+
+def test_insert_relation_extraction_handles_legacy_unit_index_collisions(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("DROP INDEX IF EXISTS ux_relation_extractions_unit_target_type")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX ux_relation_extractions_unit_target_type
+            ON relation_extractions(
+                source_doc_key,
+                source_unit_id,
+                COALESCE(target_norm_key, ''),
+                relation_type,
+                scope,
+                COALESCE(scope_detail, '')
+            )
+            """
+        )
+
+        row = {
+            "citation_id": 1,
+            "link_id": 1,
+            "source_doc_key": "RG-LEGACY",
+            "source_unit_id": 10,
+            "source_unit_number": "10",
+            "source_unit_text": "Derógase la Ley X",
+            "target_norm_key": "LEY-X",
+        }
+        candidate = RelationCandidate(
+            relation_type="REPEALS",
+            direction="SOURCE_TO_TARGET",
+            scope="WHOLE_NORM",
+            scope_detail=None,
+            confidence=0.9,
+            evidence_snippet="Derógase",
+            explanation="Derogación detectada",
+        )
+
+        first_id, inserted_first, updated_first = _insert_relation_extraction(
+            conn,
+            row=row,
+            candidate=candidate,
+            method="REGEX",
+            extract_version="relext-v2",
+        )
+        assert inserted_first is True
+        assert updated_first is False
+
+        second_id, inserted_second, updated_second = _insert_relation_extraction(
+            conn,
+            row=row,
+            candidate=RelationCandidate(
+                relation_type="REPEALS",
+                direction="SOURCE_TO_TARGET",
+                scope="WHOLE_NORM",
+                scope_detail=None,
+                confidence=0.8,
+                evidence_snippet="Derógase",
+                explanation="Derogación detectada",
+            ),
+            method="MIXED",
+            extract_version="relext-v2",
+        )
+
+        assert second_id == first_id
+        assert inserted_second is False
+        assert updated_second is True
+
+        count = conn.execute("SELECT COUNT(*) FROM relation_extractions").fetchone()[0]
+        assert count == 1

@@ -9,7 +9,7 @@ import sqlite3
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rg_atp_pipeline.config import load_config
 from rg_atp_pipeline.paths import config_path
@@ -68,6 +68,7 @@ def run_relations(
     only_structured: bool = False,
     extract_version: str = "relext-v2",
     citation_extract_version: str | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     """Run relation typing from existing citations and links."""
     ensure_schema(db_path)
@@ -142,6 +143,8 @@ def run_relations(
             citation_extract_version=citation_extract_version,
         )
         docs_processed = len({row["source_doc_key"] for row in rows})
+        if progress_callback:
+            progress_callback(0, len(rows), "Analizando citas y detectando candidatos...")
         pending_llm: list[dict[str, Any]] = []
         units_cache: dict[str, dict[str, StructuredUnit]] = {}
         units_seen_for_intra: dict[tuple[str, int], dict[str, Any]] = {}
@@ -213,6 +216,8 @@ def run_relations(
                 deduped_pending[dedup_key] = (
                     pending if existing_pending is None else _pick_preferred_pending_relation(existing_pending, pending)
                 )
+            if progress_callback:
+                progress_callback(links_seen, len(rows), "Analizando citas y detectando candidatos...")
 
         for pending in deduped_pending.values():
             row = pending.row
@@ -279,6 +284,8 @@ def run_relations(
         )
 
         if llm_mode in {"verify", "verify_all"} and pending_llm:
+            if progress_callback:
+                progress_callback(0, len(pending_llm), "Verificando relaciones con LLM...")
             for start in range(0, len(pending_llm), batch_size):
                 batch = pending_llm[start : start + batch_size]
                 batches_sent += 1
@@ -320,6 +327,9 @@ def run_relations(
                             explanation="Error invocando LLM para batch.",
                         ):
                             parse_error_now += 1
+                    if progress_callback:
+                        processed = min(start + len(batch), len(pending_llm))
+                        progress_callback(processed, len(pending_llm), "Verificando relaciones con LLM...")
                     continue
                 results = _normalize_llm_batch_response(raw_results)
                 raw_response_preview = _preview_value(raw_results, max_length=4000)
@@ -345,6 +355,9 @@ def run_relations(
                                 empty_response_now += 1
                             else:
                                 parse_error_now += 1
+                    if progress_callback:
+                        processed = min(start + len(batch), len(pending_llm))
+                        progress_callback(processed, len(pending_llm), "Verificando relaciones con LLM...")
                     continue
 
                 if has_parse_error_payload:
@@ -494,6 +507,10 @@ def run_relations(
                         item["target_norm_key"]
                     ):
                         inserted_according_to_with_target_now += 1
+
+                if progress_callback:
+                    processed = min(start + len(batch), len(pending_llm))
+                    progress_callback(processed, len(pending_llm), "Verificando relaciones con LLM...")
 
         for unit in units_seen_for_intra.values():
             intra_norm_relations_inserted += _materialize_intra_norm_relations(
@@ -839,6 +856,14 @@ def _insert_relation_extraction(
             extract_version=extract_version,
         )
         if existing_after is None:
+            existing_after = _select_relation_by_unit_collision_key(
+                conn,
+                source_doc_key=row["source_doc_key"],
+                source_unit_id=row["source_unit_id"],
+                target_norm_key=normalized_target_norm_key,
+                relation_type=candidate.relation_type,
+            )
+        if existing_after is None:
             raise
         conn.execute(
             """
@@ -885,11 +910,47 @@ def _insert_relation_extraction(
         method=method,
         extract_version=extract_version,
     )
+    matched_unique_after = existing_after is not None
+    if existing_after is None:
+        existing_after = _select_relation_by_unit_collision_key(
+            conn,
+            source_doc_key=row["source_doc_key"],
+            source_unit_id=row["source_unit_id"],
+            target_norm_key=normalized_target_norm_key,
+            relation_type=candidate.relation_type,
+        )
     if existing_after is None:
         return None, False, False
-    inserted = existing_before is None
-    updated = existing_before is not None
+    inserted = existing_before is None and matched_unique_after
+    updated = not inserted
     return int(existing_after["relation_id"]), inserted, updated
+
+
+def _select_relation_by_unit_collision_key(
+    conn: sqlite3.Connection,
+    source_doc_key: Any,
+    source_unit_id: Any,
+    target_norm_key: Any,
+    relation_type: Any,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT relation_id
+        FROM relation_extractions
+        WHERE source_doc_key = ?
+          AND source_unit_id = ?
+          AND COALESCE(target_norm_key, '') = COALESCE(?, '')
+          AND relation_type = ?
+        ORDER BY created_at DESC, relation_id DESC
+        LIMIT 1
+        """,
+        (
+            source_doc_key,
+            _safe_int(source_unit_id),
+            target_norm_key,
+            relation_type,
+        ),
+    ).fetchone()
 
 
 def _select_relation_by_unique_key(
