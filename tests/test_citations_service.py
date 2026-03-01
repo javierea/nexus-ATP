@@ -994,3 +994,130 @@ def test_insert_review_skips_when_citation_no_longer_exists(tmp_path: Path):
         )
 
     assert inserted is False
+
+
+def test_verify_all_reuses_existing_reviews_without_new_llm_calls(monkeypatch, tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-021"
+    (raw_text_dir / f"{doc_key}.txt").write_text("Ley 83-F.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    def first_verify_candidates(payload, **_kwargs):
+        return [
+            {
+                "candidate_id": item["candidate_id"],
+                "is_reference": True,
+                "norm_type": "LEY",
+                "normalized_key": "LEY-83-F",
+                "confidence": 0.99,
+                "explanation": "reference",
+            }
+            for item in payload
+        ]
+
+    monkeypatch.setattr(citations_service, "verify_candidates", first_verify_candidates)
+    first = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="verify_all",
+        min_confidence=0.7,
+        create_placeholders=False,
+    )
+    assert first["reviews_inserted_now"] == 1
+
+    calls = {"count": 0}
+
+    def second_verify_candidates(_payload, **_kwargs):
+        calls["count"] += 1
+        return []
+
+    monkeypatch.setattr(citations_service, "verify_candidates", second_verify_candidates)
+    second = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="verify_all",
+        min_confidence=0.7,
+        create_placeholders=False,
+    )
+
+    assert calls["count"] == 0
+    assert second["skipped_already_reviewed_count"] == 1
+    assert second["reviews_inserted_now"] == 0
+
+
+
+def test_upsert_link_skips_when_fk_rows_are_missing(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+
+        action = citations_service._upsert_link(  # noqa: SLF001
+            conn,
+            citation_id=99999,
+            target_norm_id=1,
+            target_norm_key="LEY-83-F",
+            status="RESOLVED",
+            confidence=0.95,
+        )
+        assert action is None
+
+        now = "2026-01-01T00:00:00+00:00"
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key,
+                source_unit_id,
+                source_unit_type,
+                raw_text,
+                norm_type_guess,
+                norm_key_candidate,
+                evidence_snippet,
+                extract_version,
+                regex_confidence,
+                detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "RG-TEST-001",
+                "1",
+                "ARTICULO",
+                "Ley 83-F",
+                "LEY",
+                "LEY-83-F",
+                "Ley 83-F",
+                "citext-v2",
+                0.99,
+                now,
+            ),
+        )
+        citation_id = int(conn.execute("SELECT citation_id FROM citations LIMIT 1").fetchone()[0])
+
+        action = citations_service._upsert_link(  # noqa: SLF001
+            conn,
+            citation_id=citation_id,
+            target_norm_id=12345,
+            target_norm_key="LEY-83-F",
+            status="RESOLVED",
+            confidence=0.95,
+        )
+        assert action == "inserted"
+
+        row = conn.execute(
+            "SELECT target_norm_id, target_norm_key FROM citation_links WHERE citation_id = ?",
+            (citation_id,),
+        ).fetchone()
+
+    assert row is not None
+    assert row["target_norm_id"] is None
+    assert row["target_norm_key"] == "LEY-83-F"
