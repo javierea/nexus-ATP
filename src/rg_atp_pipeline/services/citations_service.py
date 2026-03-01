@@ -353,6 +353,7 @@ def run_citations(
                         if inserted:
                             reviews_inserted_now += 1
                         reviews[citation_id] = review
+                    conn.commit()
                     _emit_progress(
                         progress_callback,
                         stage="llm",
@@ -361,6 +362,8 @@ def run_citations(
                         message=f"Verificación LLM batch {llm_batches_sent}/{max(1, (len(gated) + batch_size - 1) // batch_size)}",
                     )
 
+            links_since_commit = 0
+            links_commit_every = max(1, batch_size)
             for citation in citations:
                 review = reviews.get(citation.citation_id)
                 target_norm_id, target_norm_key, target_norm_status = _resolve_norm(
@@ -399,7 +402,8 @@ def run_citations(
                             target_norm_key=target_norm_key,
                             target_norm_id=target_norm_id,
                         )
-                        raise
+                        errors += 1
+                        continue
                     except sqlite3.OperationalError as exc:
                         _log_operational_error(
                             logger,
@@ -409,7 +413,12 @@ def run_citations(
                             target_norm_key=target_norm_key,
                             target_norm_id=target_norm_id,
                         )
-                        raise
+                        errors += 1
+                        continue
+                    links_since_commit += 1
+                    if links_since_commit >= links_commit_every:
+                        conn.commit()
+                        links_since_commit = 0
                     continue
 
                 decision = _decide_reference(
@@ -441,7 +450,8 @@ def run_citations(
                             exc,
                             citation=citation,
                         )
-                        raise
+                        errors += 1
+                        continue
                     except sqlite3.OperationalError as exc:
                         _log_operational_error(
                             logger,
@@ -449,7 +459,12 @@ def run_citations(
                             exc,
                             citation=citation,
                         )
-                        raise
+                        errors += 1
+                        continue
+                    links_since_commit += 1
+                    if links_since_commit >= links_commit_every:
+                        conn.commit()
+                        links_since_commit = 0
                     continue
                 if decision["status"] == "SKIPPED":
                     continue
@@ -484,7 +499,8 @@ def run_citations(
                             target_norm_key=target_norm_key,
                             target_norm_id=target_norm_id,
                         )
-                        raise
+                        errors += 1
+                        continue
                     except sqlite3.OperationalError as exc:
                         _log_operational_error(
                             logger,
@@ -494,7 +510,12 @@ def run_citations(
                             target_norm_key=target_norm_key,
                             target_norm_id=target_norm_id,
                         )
-                        raise
+                        errors += 1
+                        continue
+                    links_since_commit += 1
+                    if links_since_commit >= links_commit_every:
+                        conn.commit()
+                        links_since_commit = 0
                     continue
 
                 if create_placeholders:
@@ -524,7 +545,8 @@ def run_citations(
                             citation=citation,
                             target_norm_key=placeholder_key,
                         )
-                        raise
+                        errors += 1
+                        continue
                     try:
                         action = _upsert_link(
                             conn,
@@ -546,7 +568,8 @@ def run_citations(
                             target_norm_key=placeholder_key,
                             target_norm_id=target_norm_id,
                         )
-                        raise
+                        errors += 1
+                        continue
                     except sqlite3.OperationalError as exc:
                         _log_operational_error(
                             logger,
@@ -556,7 +579,12 @@ def run_citations(
                             target_norm_key=placeholder_key,
                             target_norm_id=target_norm_id,
                         )
-                        raise
+                        errors += 1
+                        continue
+                    links_since_commit += 1
+                    if links_since_commit >= links_commit_every:
+                        conn.commit()
+                        links_since_commit = 0
                 else:
                     try:
                         action = _upsert_link(
@@ -577,7 +605,8 @@ def run_citations(
                             exc,
                             citation=citation,
                         )
-                        raise
+                        errors += 1
+                        continue
                     except sqlite3.OperationalError as exc:
                         _log_operational_error(
                             logger,
@@ -585,7 +614,14 @@ def run_citations(
                             exc,
                             citation=citation,
                         )
-                        raise
+                        errors += 1
+                        continue
+                    links_since_commit += 1
+                    if links_since_commit >= links_commit_every:
+                        conn.commit()
+                        links_since_commit = 0
+            if links_since_commit:
+                conn.commit()
             links_status_totals = _count_links_by_status(conn, logger)
     finally:
         conn.close()
