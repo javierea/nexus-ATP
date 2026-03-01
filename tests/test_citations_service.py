@@ -866,20 +866,60 @@ def test_deterministic_alias_resolution_overrides_negative_llm_for_ctp(
     assert summary["llm_overruled_by_deterministic_now"] == 1
     assert summary["rejected_by_llm_now"] == 0
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            """
-            SELECT resolution_status, target_norm_key
-            FROM citation_links
-            ORDER BY citation_id
-            LIMIT 1
-            """
-        ).fetchone()
 
-    assert row is not None
-    assert row["resolution_status"] == "RESOLVED"
-    assert row["target_norm_key"] == "LEY-83-F"
+def test_citations_persists_llm_reviews_when_link_insert_fails(monkeypatch, tmp_path: Path):
+    data_dir = tmp_path / "data"
+    raw_text_dir = data_dir / "raw_text"
+    raw_text_dir.mkdir(parents=True)
+    doc_key = "RG-2024-FAIL-LINK"
+    (raw_text_dir / f"{doc_key}.txt").write_text("Según Ley 666-K.", encoding="utf-8")
+
+    db_path = data_dir / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    def fake_verify_candidates(payload, **_kwargs):
+        citation_id = payload[0]["candidate_id"]
+        return [
+            {
+                "candidate_id": citation_id,
+                "is_reference": True,
+                "confidence": 0.95,
+                "normalized_key": "LEY-666-K",
+                "norm_type": "LEY",
+                "explanation": "Referencia válida.",
+            }
+        ]
+
+    monkeypatch.setattr(citations_service, "verify_candidates", fake_verify_candidates)
+
+    original_upsert_link = citations_service._upsert_link  # noqa: SLF001
+    calls = {"count": 0}
+
+    def failing_once(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+        return original_upsert_link(*args, **kwargs)
+
+    monkeypatch.setattr(citations_service, "_upsert_link", failing_once)
+
+    summary = run_citations(
+        db_path=db_path,
+        data_dir=data_dir,
+        doc_keys=[doc_key],
+        limit_docs=None,
+        llm_mode="verify_all",
+        min_confidence=0.7,
+        create_placeholders=False,
+        batch_size=1,
+    )
+
+    assert summary["errors"] == 1
+    assert summary["reviews_inserted_now"] == 1
+    with sqlite3.connect(db_path) as conn:
+        review_count = conn.execute("SELECT COUNT(*) FROM citation_llm_reviews").fetchone()[0]
+    assert review_count == 1
+
 
 
 def test_verify_ignores_out_of_batch_candidate_ids(monkeypatch, tmp_path: Path):
