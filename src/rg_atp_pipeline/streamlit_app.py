@@ -552,6 +552,15 @@ def render_relations_stage(db_path: Path) -> None:
         if submitted:
             doc_keys = parse_doc_keys_input(doc_keys_raw) or None
             limit_docs = parse_optional_int(limit_docs_raw)
+            progress_text = st.empty()
+            progress_bar = st.progress(0.0, text="Preparando Etapa 4.1...")
+
+            def _update_progress(current: int, total: int, message: str) -> None:
+                safe_total = max(1, int(total))
+                ratio = min(max(float(current) / safe_total, 0.0), 1.0)
+                progress_bar.progress(ratio, text=message)
+                progress_text.caption(f"{message} ({int(current)}/{int(total)})")
+
             try:
                 with st.spinner("Ejecutando Etapa 4.1..."):
                     summary = run_relations_ui(
@@ -565,10 +574,14 @@ def render_relations_stage(db_path: Path) -> None:
                         batch_size=int(batch_size),
                         ollama_model=ollama_model if llm_mode in {"verify", "verify_all"} else None,
                         ollama_base_url=ollama_base_url if llm_mode in {"verify", "verify_all"} else None,
+                        progress_callback=_update_progress,
                     )
             except Exception as exc:  # noqa: BLE001
+                progress_bar.empty()
                 st.error(f"Error al ejecutar Etapa 4.1: {exc}")
             else:
+                progress_bar.progress(1.0, text="Etapa 4.1 completada")
+                progress_text.caption("Etapa 4.1 finalizada.")
                 st.session_state["relations_summary"] = summary
                 st.success("Etapa 4.1 completada.")
                 st.json(summary)

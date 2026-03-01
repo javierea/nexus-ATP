@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rg_atp_pipeline.services.relations_service import run_relations
 
@@ -23,6 +23,7 @@ def run_relations_ui(
     only_structured: bool = False,
     extract_version: str = "relext-v2",
     citation_extract_version: str | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     """Execute Stage 4.1 relation extraction and return summary payload."""
     effective_batch_size = int(batch_size) if batch_size is not None else 20
@@ -40,6 +41,7 @@ def run_relations_ui(
         only_structured=only_structured,
         extract_version=extract_version,
         citation_extract_version=citation_extract_version,
+        progress_callback=progress_callback,
     )
 
 
