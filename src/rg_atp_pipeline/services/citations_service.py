@@ -259,24 +259,28 @@ def run_citations(
                             llm_gate_regex_threshold,
                         ):
                             continue
-                        if _has_review(
+                        existing_review = _get_existing_review(
                             conn,
                             citation.citation_id,
                             ollama_model,
                             prompt_version,
-                        ):
+                        )
+                        if existing_review is not None:
                             llm_skipped_already_reviewed_count += 1
+                            reviews[citation.citation_id] = existing_review
                             continue
                         gated.append(citation)
                 else:
                     for citation in citations:
-                        if _has_review(
+                        existing_review = _get_existing_review(
                             conn,
                             citation.citation_id,
                             ollama_model,
                             prompt_version,
-                        ):
+                        )
+                        if existing_review is not None:
                             llm_skipped_already_reviewed_count += 1
+                            reviews[citation.citation_id] = existing_review
                             continue
                         gated.append(citation)
                 llm_gated_count = len(gated)
@@ -1111,15 +1115,33 @@ def _has_review(
     model: str,
     prompt_version: str,
 ) -> bool:
+    return _get_existing_review(conn, citation_id, model, prompt_version) is not None
+
+
+def _get_existing_review(
+    conn: sqlite3.Connection,
+    citation_id: int,
+    model: str,
+    prompt_version: str,
+) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT review_id
+        SELECT is_reference, norm_type, normalized_key, llm_confidence, explanation
         FROM citation_llm_reviews
         WHERE citation_id = ? AND llm_model = ? AND prompt_version = ?
         """,
         (citation_id, model, prompt_version),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return None
+    return {
+        "citation_id": citation_id,
+        "is_reference": bool(row["is_reference"]),
+        "norm_type": str(row["norm_type"] or "OTRO").upper(),
+        "normalized_key": row["normalized_key"] or None,
+        "confidence": _parse_confidence(row["llm_confidence"]),
+        "explanation": str(row["explanation"] or "")[:200],
+    }
 
 
 def _decide_reference(
@@ -1178,6 +1200,11 @@ def _upsert_link(
     status: str,
     confidence: float,
 ) -> str | None:
+    if not _citation_exists(conn, citation_id):
+        return None
+    if target_norm_id is not None and not _norm_exists(conn, target_norm_id):
+        target_norm_id = None
+
     previous = conn.execute(
         """
         SELECT
@@ -1238,7 +1265,7 @@ def _link_changed(
     target_norm_key: str | None,
     status: str,
     confidence: float,
-) -> bool:
+    ) -> bool:
     return any(
         [
             previous["target_norm_id"] != target_norm_id,
@@ -1247,6 +1274,14 @@ def _link_changed(
             abs(float(previous["resolution_confidence"]) - float(confidence)) > 1e-9,
         ]
     )
+
+
+def _norm_exists(conn: sqlite3.Connection, norm_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM norms WHERE norm_id = ?",
+        (norm_id,),
+    ).fetchone()
+    return row is not None
 
 
 def _chunked(items: list[CitationPayload], size: int) -> list[list[CitationPayload]]:
