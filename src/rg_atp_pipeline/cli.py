@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,58 @@ from .rg_detector import detect_rg_starts, export_rg_splits
 from .web_ui import run_ui
 
 app = typer.Typer(help="rg_atp_pipeline CLI (Etapa 3)")
+
+
+def _normalize_sql(sql: str) -> str:
+    return " ".join((sql or "").strip().lower().split())
+
+
+def _fetch_single_int(conn: sqlite3.Connection, query: str) -> int:
+    row = conn.execute(query).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _fetch_duplicate_rows(
+    conn: sqlite3.Connection,
+    key_expr: str,
+    limit: int = 15,
+) -> list[dict[str, object]]:
+    rows = conn.execute(
+        f"""
+        SELECT
+            source_doc_key,
+            source_unit_id,
+            COALESCE(target_norm_key, '') AS target_norm_key,
+            relation_type,
+            scope,
+            COALESCE(scope_detail, '') AS scope_detail,
+            method,
+            extract_version,
+            COUNT(*) AS n
+        FROM relation_extractions
+        GROUP BY {key_expr}
+        HAVING COUNT(*) > 1
+        ORDER BY n DESC, source_doc_key, source_unit_id
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    result: list[dict[str, object]] = []
+    for row in rows:
+        result.append(
+            {
+                "source_doc_key": row[0],
+                "source_unit_id": row[1],
+                "target_norm_key": row[2],
+                "relation_type": row[3],
+                "scope": row[4],
+                "scope_detail": row[5],
+                "method": row[6],
+                "extract_version": row[7],
+                "count": row[8],
+            }
+        )
+    return result
 
 
 
@@ -535,6 +588,130 @@ def relations(
         citation_extract_version=citation_extract_version,
     )
     typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
+@app.command("relations-index-diagnose")
+def relations_index_diagnose(
+    db_path: str = typer.Option(
+        str(data_dir() / "state" / "rg_atp.sqlite"),
+        "--db-path",
+        help="Ruta al SQLite a inspeccionar.",
+    ),
+    examples: int = typer.Option(
+        15,
+        "--examples",
+        min=1,
+        max=200,
+        help="Cantidad de ejemplos de colisión a mostrar.",
+    ),
+) -> None:
+    """Diagnostica colisiones del índice único de Etapa 4.1 con SQL directo."""
+    sqlite_path = Path(db_path)
+    if not sqlite_path.exists():
+        typer.secho(f"No existe DB: {sqlite_path}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    expected_index_sql = """CREATE UNIQUE INDEX ux_relation_extractions_unit_target_type
+ON relation_extractions(
+    source_doc_key,
+    source_unit_id,
+    COALESCE(target_norm_key, ''),
+    relation_type,
+    scope,
+    COALESCE(scope_detail, ''),
+    method,
+    extract_version
+)"""
+    expected_normalized = _normalize_sql(expected_index_sql)
+
+    with sqlite3.connect(sqlite_path) as conn:
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='relation_extractions' LIMIT 1"
+        ).fetchone() is not None
+        if not table_exists:
+            typer.secho("No existe la tabla relation_extractions en la DB.", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=0)
+
+        idx_row = conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type='index' AND name='ux_relation_extractions_unit_target_type'
+            LIMIT 1
+            """
+        ).fetchone()
+        index_sql = str(idx_row[0] or "") if idx_row else ""
+        normalized_actual = _normalize_sql(index_sql)
+        index_matches_expected = bool(index_sql) and normalized_actual == expected_normalized
+
+        total_rows = _fetch_single_int(conn, "SELECT COUNT(*) FROM relation_extractions")
+        null_target = _fetch_single_int(
+            conn,
+            "SELECT COUNT(*) FROM relation_extractions WHERE target_norm_key IS NULL",
+        )
+        null_scope_detail = _fetch_single_int(
+            conn,
+            "SELECT COUNT(*) FROM relation_extractions WHERE scope_detail IS NULL",
+        )
+
+        legacy_key_expr = """
+            source_doc_key,
+            source_unit_id,
+            COALESCE(target_norm_key, ''),
+            relation_type
+        """
+        current_key_expr = """
+            source_doc_key,
+            source_unit_id,
+            COALESCE(target_norm_key, ''),
+            relation_type,
+            scope,
+            COALESCE(scope_detail, ''),
+            method,
+            extract_version
+        """
+
+        legacy_duplicate_groups = _fetch_single_int(
+            conn,
+            f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT 1
+                FROM relation_extractions
+                GROUP BY {legacy_key_expr}
+                HAVING COUNT(*) > 1
+            ) t
+            """,
+        )
+        current_duplicate_groups = _fetch_single_int(
+            conn,
+            f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT 1
+                FROM relation_extractions
+                GROUP BY {current_key_expr}
+                HAVING COUNT(*) > 1
+            ) t
+            """,
+        )
+
+        diagnosis = {
+            "db_path": str(sqlite_path),
+            "total_relation_rows": total_rows,
+            "index_present": bool(index_sql),
+            "index_matches_expected": index_matches_expected,
+            "index_sql": index_sql,
+            "expected_index_sql": expected_index_sql,
+            "null_target_norm_key_rows": null_target,
+            "null_scope_detail_rows": null_scope_detail,
+            "legacy_duplicate_groups": legacy_duplicate_groups,
+            "current_duplicate_groups": current_duplicate_groups,
+            "legacy_duplicate_examples": _fetch_duplicate_rows(conn, legacy_key_expr, limit=examples),
+            "current_duplicate_examples": _fetch_duplicate_rows(conn, current_key_expr, limit=examples),
+        }
+
+    typer.echo(json.dumps(diagnosis, indent=2, ensure_ascii=False))
 
 
 
