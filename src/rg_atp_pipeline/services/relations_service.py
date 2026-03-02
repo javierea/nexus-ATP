@@ -1570,6 +1570,7 @@ def _update_relation_with_review(
 
 
 def _delete_relation_extraction(conn: sqlite3.Connection, relation_id: int) -> bool:
+    conn.execute("DELETE FROM relation_llm_reviews WHERE relation_id = ?", (relation_id,))
     cur = conn.execute("DELETE FROM relation_extractions WHERE relation_id = ?", (relation_id,))
     return bool(cur.rowcount)
 
