@@ -64,6 +64,8 @@ from rg_atp_pipeline.norms_ui import (
     upload_norm_pdf_ui,
 )
 from rg_atp_pipeline.relations_ui import (
+    list_citation_extract_versions,
+    list_relation_extract_versions,
     get_relations_inconsistencies,
     get_relations_qa_samples,
     get_relations_summary,
@@ -73,6 +75,7 @@ from rg_atp_pipeline.relations_ui import (
     list_relation_types,
     run_relations_ui,
 )
+from rg_atp_pipeline.services.graphrag_validation import run_graphrag_validation
 
 
 st.set_page_config(page_title="RG ATP Control Panel", layout="wide")
@@ -347,6 +350,29 @@ def cached_relations_inconsistencies(db_path_str: str) -> dict[str, Any]:
     return get_relations_inconsistencies(Path(db_path_str))
 
 
+@st.cache_data(ttl=30)
+def cached_relation_extract_versions(db_path_str: str) -> list[str]:
+    return list_relation_extract_versions(Path(db_path_str))
+
+
+@st.cache_data(ttl=30)
+def cached_citation_extract_versions(db_path_str: str) -> list[str]:
+    return list_citation_extract_versions(Path(db_path_str))
+
+
+@st.cache_data(ttl=10)
+def cached_graphrag_validation(
+    db_path_str: str,
+    relation_extract_version: str | None,
+    citation_extract_version: str | None,
+) -> dict[str, Any]:
+    return run_graphrag_validation(
+        db_path=Path(db_path_str),
+        relation_extract_version=relation_extract_version,
+        citation_extract_version=citation_extract_version,
+    )
+
+
 @st.cache_data(ttl=10)
 def cached_relation_prompt_versions(db_path_str: str) -> list[str]:
     return list_relation_prompt_versions(Path(db_path_str))
@@ -522,7 +548,7 @@ def render_relations_stage(db_path: Path) -> None:
     config = load_config(config_path())
     data_root = data_dir()
 
-    run_tab, summary_tab, explore_tab, audit_tab = st.tabs(["Ejecutar 4.1", "Resumen", "Explorar", "Auditoría"])
+    run_tab, summary_tab, explore_tab, audit_tab, graphrag_tab = st.tabs(["Ejecutar 4.1", "Resumen", "Explorar", "Auditoría", "GraphRAG Validate"])
 
     with run_tab:
         with st.form("relations_form"):
@@ -753,6 +779,78 @@ def render_relations_stage(db_path: Path) -> None:
         else:
             st.caption("No hay descartes ACCORDING_TO sin target en la última corrida.")
 
+    with graphrag_tab:
+        st.subheader("Validación GraphRAG")
+        relation_versions = cached_relation_extract_versions(str(db_path))
+        citation_versions = cached_citation_extract_versions(str(db_path))
+
+        col1, col2 = st.columns(2)
+        selected_relation = col1.selectbox(
+            "relation_extract_version",
+            ["Auto (última)", *relation_versions],
+            index=0,
+        )
+        selected_citation = col2.selectbox(
+            "citation_extract_version",
+            ["Auto (sin filtro)", *citation_versions],
+            index=0,
+        )
+
+        relation_filter = None if selected_relation == "Auto (última)" else selected_relation
+        citation_filter = None if selected_citation == "Auto (sin filtro)" else selected_citation
+
+        if st.button("Ejecutar graphrag-validate", type="primary"):
+            try:
+                summary = cached_graphrag_validation(
+                    str(db_path),
+                    relation_filter,
+                    citation_filter,
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"No se pudo ejecutar graphrag-validate: {exc}")
+            else:
+                st.session_state["graphrag_validation_summary"] = summary
+
+        summary = st.session_state.get("graphrag_validation_summary")
+        if summary:
+            readiness = bool(summary.get("graphrag_ready"))
+            if readiness:
+                st.success("GraphRAG ready: sí")
+            else:
+                st.warning("GraphRAG ready: no")
+
+            kpis = summary.get("kpis") or {}
+            queries = summary.get("business_queries") or {}
+            acceptance = summary.get("acceptance") or {}
+            m1, m2, m3 = st.columns(3)
+            m1.metric("total_external_relations", int(kpis.get("total_external_relations", 0) or 0))
+            m2.metric("total_intra_norm_relations", int(kpis.get("total_intra_norm_relations", 0) or 0))
+            m3.metric("distinct_relation_types", int(kpis.get("distinct_relation_types", 0) or 0))
+
+            st.caption("Queries de negocio")
+            st.dataframe(
+                maybe_dataframe(
+                    [
+                        {"query": key, "count": int(value or 0)}
+                        for key, value in queries.items()
+                    ]
+                ),
+                width='stretch',
+            )
+            st.caption("Checks de aceptación")
+            st.dataframe(
+                maybe_dataframe(
+                    [
+                        {"check": key, "ok": bool(value)}
+                        for key, value in acceptance.items()
+                    ]
+                ),
+                width='stretch',
+            )
+            with st.expander("Salida JSON"):
+                st.json(summary)
+        else:
+            st.info("Ejecuta la validación para ver KPIs y estado GraphRAG-ready.")
 
 
 

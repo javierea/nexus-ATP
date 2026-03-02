@@ -401,6 +401,42 @@ def list_relation_scopes(db_path: Path) -> list[str]:
     return [str(row[0]) for row in rows]
 
 
+def list_relation_extract_versions(db_path: Path) -> list[str]:
+    """List relation extract versions ordered by most recent run."""
+    if not db_path.exists():
+        return []
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT extract_version
+            FROM relation_extractions
+            WHERE COALESCE(TRIM(extract_version), '') <> ''
+            GROUP BY extract_version
+            ORDER BY MAX(created_at) DESC, extract_version DESC
+            LIMIT 100
+            """
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def list_citation_extract_versions(db_path: Path) -> list[str]:
+    """List citation extract versions ordered by most recent run."""
+    if not db_path.exists():
+        return []
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT extract_version
+            FROM citations
+            WHERE COALESCE(TRIM(extract_version), '') <> ''
+            GROUP BY extract_version
+            ORDER BY MAX(detected_at) DESC, extract_version DESC
+            LIMIT 100
+            """
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
 def _relations_prompt_filter(prompt_version: str | None) -> tuple[str, list[Any]]:
     if not prompt_version:
         return "", []

@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from rg_atp_pipeline.relations_ui import get_relations_summary, get_relations_table
+from rg_atp_pipeline.relations_ui import (
+    get_relations_summary,
+    get_relations_table,
+    list_citation_extract_versions,
+    list_relation_extract_versions,
+)
 from rg_atp_pipeline.storage.migrations import ensure_schema
 
 
@@ -230,3 +235,73 @@ def test_get_relations_table_prompt_version_keeps_rows_without_review(tmp_path: 
     assert rows_by_relation_id[second_relation_id]["llm_confidence"] is None
     assert rows_by_relation_id[second_relation_id]["llm_model"] is None
     assert rows_by_relation_id[second_relation_id]["prompt_version"] is None
+
+
+def test_list_extract_versions(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_schema(db_path)
+
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO citations (
+                citation_id, source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet, evidence_unit_id,
+                evidence_text, evidence_kind, regex_confidence, detected_at, extract_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1, "RG-1", "1", "ARTICULO", "Ley 1",
+                "LEY", "LEY-1", "snippet", 1, "snippet", "UNIT",
+                0.9, "2026-01-01T00:00:00Z", "citext-v2",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO citations (
+                citation_id, source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet, evidence_unit_id,
+                evidence_text, evidence_kind, regex_confidence, detected_at, extract_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                2, "RG-2", "2", "ARTICULO", "Ley 2",
+                "LEY", "LEY-2", "snippet", 2, "snippet", "UNIT",
+                0.9, "2026-01-02T00:00:00Z", "citext-v3",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, target_norm_key, relation_type,
+                direction, scope, scope_detail, method, confidence, evidence_snippet,
+                explanation, created_at, extract_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1, None, "RG-1", "LEY-1", "MODIFIES",
+                "SOURCE_TO_TARGET", "ARTICLE", "ART_1", "REGEX",
+                0.9, "snippet", "ok", "2026-01-01T00:00:00Z", "relext-v2",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, link_id, source_doc_key, target_norm_key, relation_type,
+                direction, scope, scope_detail, method, confidence, evidence_snippet,
+                explanation, created_at, extract_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                2, None, "RG-2", "LEY-2", "ACCORDING_TO",
+                "UNKNOWN", "WHOLE_NORM", "", "REGEX",
+                0.8, "snippet", "ok", "2026-01-02T00:00:00Z", "relext-v9",
+            ),
+        )
+        conn.commit()
+
+    assert list_citation_extract_versions(db_path)[:2] == ["citext-v3", "citext-v2"]
+    assert list_relation_extract_versions(db_path)[:2] == ["relext-v9", "relext-v2"]
