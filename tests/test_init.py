@@ -552,3 +552,115 @@ def test_ensure_schema_dedupes_relation_extractions_before_unique_index(tmp_path
 
     assert rows == [(relation_id_2, 0.91)]
     assert reviews == [(relation_id_2,)]
+
+
+def test_ensure_schema_handles_null_normalization_with_legacy_unit_unique_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP INDEX IF EXISTS ux_relation_extractions_unit_target_type")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX ux_relation_extractions_unit_target_type
+            ON relation_extractions(
+                source_doc_key,
+                source_unit_id,
+                target_norm_key,
+                relation_type
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("RG-LEGACY", "10", "ARTICLE", "texto a", "LEY", "LEY-X", "s1", 0.9, "2026-01-01T00:00:00Z"),
+        )
+        citation_id_1 = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO citations (
+                source_doc_key, source_unit_id, source_unit_type, raw_text,
+                norm_type_guess, norm_key_candidate, evidence_snippet,
+                regex_confidence, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("RG-LEGACY", "10", "ARTICLE", "texto b", "LEY", "LEY-X", "s2", 0.9, "2026-01-01T00:00:01Z"),
+        )
+        citation_id_2 = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, source_doc_key, source_unit_id, source_unit_number,
+                source_unit_text, target_norm_key, extract_version,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet,
+                explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                citation_id_1,
+                "RG-LEGACY",
+                10,
+                "10",
+                "texto",
+                None,
+                "relext-v2",
+                "REPEALS",
+                "OUTGOING",
+                "WHOLE_NORM",
+                None,
+                "REGEX",
+                0.6,
+                "snippet-a",
+                "snippet-a",
+                "exp-a",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO relation_extractions (
+                citation_id, source_doc_key, source_unit_id, source_unit_number,
+                source_unit_text, target_norm_key, extract_version,
+                relation_type, direction, scope, scope_detail,
+                method, confidence, evidence_snippet, extracted_match_snippet,
+                explanation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                citation_id_2,
+                "RG-LEGACY",
+                10,
+                "10",
+                "texto",
+                "",
+                "relext-v2",
+                "REPEALS",
+                "OUTGOING",
+                "ARTICLE",
+                "1",
+                "MIXED",
+                0.9,
+                "snippet-b",
+                "snippet-b",
+                "exp-b",
+                "2026-01-01T00:00:01Z",
+            ),
+        )
+        conn.commit()
+
+    ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT target_norm_key, scope, method, confidence FROM relation_extractions"
+        ).fetchall()
+
+    assert rows == [("", "ARTICLE", "MIXED", 0.9)]
