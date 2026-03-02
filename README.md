@@ -95,6 +95,7 @@ python -m rg_atp_pipeline ui-streamlit --host 127.0.0.1 --port 8501
 - `citations` (Etapa 4) detecta referencias normativas en RGs, verifica opcionalmente con Ollama local y resuelve contra el catálogo `norms` (no clasifica relaciones deroga/modifica).
 - `relations` (Etapa 4.1) tipifica relaciones normativas desde `citations` + `citation_links` ya resueltos (deroga/modifica/sustituye/incorpora/reglamenta/según, etc.), con validación LLM opcional y modo conservador (`UNKNOWN` cuando no es claro). Por defecto cierra el input a la última `citations.extract_version` (o `--citation-extract-version` para fijarla explícitamente).
 - Stage 4.1 también materializa relaciones intra-norma (`intra_norm_relations`) para navegación interna de artículos en consultas GraphRAG.
+- Para diagnóstico manual de errores `UNIQUE constraint failed` en Etapa 4.1, ejecutar `sqlite3 data/state/rg_atp.sqlite < docs/stage4_1_sqlite_diagnostico.sql` y compartir el output.
 - `graphrag-validate` ejecuta una suite de validación GraphRAG-ready (KPIs + queries de negocio/aceptación).
 - La página Audit de Streamlit incluye una sección opcional para depurar `missing_downloads` con Ollama local y exportar resultados por veredicto.
 - `ui` levanta una interfaz mínima para revisar inventario, ver config/estado y ejecutar fetches manuales o programados.
