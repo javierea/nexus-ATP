@@ -34,6 +34,13 @@ class PendingRelationInsert:
     unit_text: str
 
 
+_ARTICLE_TOKEN_RE = re.compile(r"\bART_(\d+[A-Z0-9]*)\b", re.IGNORECASE)
+_ARTICLE_NUMBER_RE = re.compile(
+    r"\b(?:art(?:\.|ículo|iculos|ículos|s\.)?\s*)?(\d+[A-Z0-9]*)(?:\s*[°º])?\b",
+    re.IGNORECASE,
+)
+
+
 def ensure_dict(value: Any) -> dict[str, Any]:
     """Normalize dynamic payloads to dict, preserving raw content when needed."""
     if value is None:
@@ -777,9 +784,10 @@ def _insert_relation_extraction(
     now = datetime.now(timezone.utc).isoformat()
     normalized_target_norm_key, normalized_scope_detail = _normalize_relation_index_fields(
         target_norm_key=row["target_norm_key"],
+        scope=candidate.scope,
         scope_detail=candidate.scope_detail,
     )
-    existing_before = _select_relation_by_unique_key(
+    existing_before = _select_relation_by_semantic_unique_key(
         conn,
         source_doc_key=row["source_doc_key"],
         source_unit_id=row["source_unit_id"],
@@ -844,7 +852,7 @@ def _insert_relation_extraction(
             ),
         )
     except sqlite3.IntegrityError:
-        existing_after = _select_relation_by_unique_key(
+        existing_after = _select_relation_by_semantic_unique_key(
             conn,
             source_doc_key=row["source_doc_key"],
             source_unit_id=row["source_unit_id"],
@@ -899,7 +907,7 @@ def _insert_relation_extraction(
         return int(existing_after["relation_id"]), False, True
     if not cur.rowcount:
         return None, False, False
-    existing_after = _select_relation_by_unique_key(
+    existing_after = _select_relation_by_semantic_unique_key(
         conn,
         source_doc_key=row["source_doc_key"],
         source_unit_id=row["source_unit_id"],
@@ -938,7 +946,7 @@ def _select_relation_by_unit_collision_key(
         SELECT relation_id
         FROM relation_extractions
         WHERE source_doc_key = ?
-          AND source_unit_id = ?
+          AND COALESCE(source_unit_id, -1) = COALESCE(?, -1)
           AND COALESCE(target_norm_key, '') = COALESCE(?, '')
           AND relation_type = ?
         ORDER BY created_at DESC, relation_id DESC
@@ -963,13 +971,14 @@ def _select_relation_by_unique_key(
     scope_detail: Any,
     method: Any,
     extract_version: Any,
+    exclude_relation_id: int | None = None,
 ) -> sqlite3.Row | None:
     return conn.execute(
         """
         SELECT relation_id
         FROM relation_extractions
         WHERE source_doc_key = ?
-          AND source_unit_id = ?
+          AND COALESCE(source_unit_id, -1) = COALESCE(?, -1)
           AND COALESCE(target_norm_key, '') = COALESCE(?, '')
           AND relation_type = ?
           AND scope = ?
@@ -991,8 +1000,101 @@ def _select_relation_by_unique_key(
     ).fetchone()
 
 
-def _normalize_relation_index_fields(target_norm_key: Any, scope_detail: Any) -> tuple[str, str]:
-    return str(target_norm_key or "").strip(), str(scope_detail or "").strip()
+
+
+def _select_relation_by_semantic_unique_key(
+    conn: sqlite3.Connection,
+    source_doc_key: Any,
+    source_unit_id: Any,
+    target_norm_key: Any,
+    relation_type: Any,
+    scope: Any,
+    scope_detail: Any,
+    method: Any,
+    extract_version: Any,
+    exclude_relation_id: int | None = None,
+) -> sqlite3.Row | None:
+    normalized_scope = str(scope or "").strip().upper()
+    normalized_scope_detail = canonicalize_scope_detail(normalized_scope, scope_detail)
+    where_exclude = "" if exclude_relation_id is None else " AND relation_id <> ?"
+    sql = (
+        """
+        SELECT relation_id, scope_detail, confidence, explanation
+        FROM relation_extractions
+        WHERE source_doc_key = ?
+          AND COALESCE(source_unit_id, -1) = COALESCE(?, -1)
+          AND COALESCE(target_norm_key, '') = COALESCE(?, '')
+          AND relation_type = ?
+          AND scope = ?
+          AND method = ?
+          AND extract_version = ?
+        """
+        + where_exclude
+        + " ORDER BY created_at DESC, relation_id DESC"
+    )
+    params: list[Any] = [
+        source_doc_key,
+        _safe_int(source_unit_id),
+        target_norm_key,
+        relation_type,
+        normalized_scope,
+        method,
+        extract_version,
+    ]
+    if exclude_relation_id is not None:
+        params.append(int(exclude_relation_id))
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    for row in rows:
+        if canonicalize_scope_detail(normalized_scope, row["scope_detail"]) == normalized_scope_detail:
+            return row
+    return None
+def _normalize_relation_index_fields(target_norm_key: Any, scope: Any, scope_detail: Any) -> tuple[str, str]:
+    normalized_target = str(target_norm_key or "").strip()
+    normalized_scope = str(scope or "UNKNOWN").strip().upper()
+    return normalized_target, canonicalize_scope_detail(normalized_scope, scope_detail)
+
+
+def canonicalize_scope_detail(scope: Any, scope_detail: Any) -> str:
+    normalized_scope = str(scope or "UNKNOWN").strip().upper()
+    raw_detail = str(scope_detail or "").strip()
+
+    if normalized_scope == "WHOLE_NORM":
+        return ""
+    if normalized_scope != "ARTICLE":
+        return _normalize_stable_text(raw_detail)
+
+    if not raw_detail:
+        return "__ARTICLE_UNSPECIFIED__"
+
+    article_tokens = _parse_article_scope_tokens(raw_detail)
+    if article_tokens:
+        return "|".join(article_tokens)
+    return _normalize_stable_text(raw_detail)
+
+
+def _normalize_stable_text(value: str) -> str:
+    return " ".join(value.strip().upper().split())
+
+
+def _parse_article_scope_tokens(scope_detail: str) -> list[str]:
+    cleaned = _normalize_stable_text(scope_detail).replace("º", "").replace("°", "")
+    tokens = [f"ART_{match.group(1)}" for match in _ARTICLE_TOKEN_RE.finditer(cleaned)]
+    if not tokens:
+        tokens = [f"ART_{match.group(1)}" for match in _ARTICLE_NUMBER_RE.finditer(cleaned)]
+    return sorted(set(tokens), key=_article_token_sort_key)
+
+
+def _article_token_sort_key(token: str) -> tuple[int, str]:
+    suffix = token.removeprefix("ART_")
+    digits = ""
+    tail = ""
+    for char in suffix:
+        if char.isdigit() and not tail:
+            digits += char
+        else:
+            tail += char
+    number = int(digits) if digits else 0
+    return number, tail
 
 
 def _relation_unique_key(
@@ -1005,13 +1107,14 @@ def _relation_unique_key(
     method: Any,
     extract_version: Any,
 ) -> tuple[Any, ...]:
+    normalized_scope = str(scope or "").strip().upper()
     return (
         str(source_doc_key or "").strip(),
         _safe_int(source_unit_id),
         str(target_norm_key or "").strip(),
         str(relation_type or "").strip(),
-        str(scope or "").strip(),
-        str(scope_detail or "").strip(),
+        normalized_scope,
+        canonicalize_scope_detail(normalized_scope, scope_detail),
         str(method or "").strip(),
         str(extract_version or "").strip(),
     )
@@ -1115,6 +1218,7 @@ def _normalize_llm_result(item: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if isinstance(scope_detail, str):
         scope_detail = scope_detail.strip() or None
+    scope_detail = canonicalize_scope_detail(scope, scope_detail)
     try:
         confidence = float(item.get("confidence", 0.0))
     except (TypeError, ValueError):
@@ -1254,7 +1358,7 @@ def _update_relation_with_review(
 ) -> bool:
     source = conn.execute(
         """
-        SELECT relation_id, citation_id, link_id, method,
+        SELECT relation_id, citation_id, link_id, method, extract_version,
                relation_type, scope, scope_detail,
                source_doc_key, source_unit_id, target_norm_key,
                confidence, explanation
@@ -1266,6 +1370,11 @@ def _update_relation_with_review(
     if source is None:
         return False
 
+    normalized_review_scope = str(review.get("scope") or "UNKNOWN").strip().upper()
+    normalized_review_scope_detail = canonicalize_scope_detail(
+        normalized_review_scope,
+        review.get("scope_detail"),
+    )
     existing = conn.execute(
         """
         SELECT relation_id, confidence, explanation
@@ -1283,12 +1392,51 @@ def _update_relation_with_review(
             source["citation_id"],
             source["link_id"],
             review["relation_type"],
-            review["scope"],
-            review["scope_detail"],
+            normalized_review_scope,
+            normalized_review_scope_detail,
             source["method"],
             relation_id,
         ),
     ).fetchone()
+    if existing is None:
+        semantic_rows = conn.execute(
+            """
+            SELECT relation_id, scope_detail, confidence, explanation
+            FROM relation_extractions
+            WHERE citation_id = ?
+              AND link_id = ?
+              AND relation_type = ?
+              AND scope = ?
+              AND method = ?
+              AND relation_id <> ?
+            ORDER BY created_at DESC, relation_id DESC
+            """,
+            (
+                source["citation_id"],
+                source["link_id"],
+                review["relation_type"],
+                normalized_review_scope,
+                source["method"],
+                relation_id,
+            ),
+        ).fetchall()
+        for row in semantic_rows:
+            if canonicalize_scope_detail(normalized_review_scope, row["scope_detail"]) == normalized_review_scope_detail:
+                existing = row
+                break
+    if existing is None:
+        existing = _select_relation_by_semantic_unique_key(
+            conn,
+            source_doc_key=source["source_doc_key"],
+            source_unit_id=source["source_unit_id"],
+            target_norm_key=source["target_norm_key"],
+            relation_type=review["relation_type"],
+            scope=normalized_review_scope,
+            scope_detail=normalized_review_scope_detail,
+            method=source["method"],
+            extract_version=source["extract_version"],
+            exclude_relation_id=relation_id,
+        )
 
     if existing is None:
         try:
@@ -1302,8 +1450,8 @@ def _update_relation_with_review(
                 (
                     review["relation_type"],
                     review["direction"],
-                    review["scope"],
-                    review["scope_detail"],
+                    normalized_review_scope,
+                    normalized_review_scope_detail,
                     review["confidence"],
                     review["explanation"],
                     relation_id,
@@ -1316,7 +1464,7 @@ def _update_relation_with_review(
                 SELECT relation_id, confidence, explanation
                 FROM relation_extractions
                 WHERE source_doc_key = ?
-                  AND source_unit_id = ?
+                  AND COALESCE(source_unit_id, -1) = COALESCE(?, -1)
                   AND COALESCE(target_norm_key, '') = COALESCE(?, '')
                   AND relation_type = ?
                   AND relation_id <> ?
@@ -1356,8 +1504,8 @@ def _update_relation_with_review(
                 """,
                 (
                     review["direction"],
-                    review["scope"],
-                    review["scope_detail"],
+                    normalized_review_scope,
+                    normalized_review_scope_detail,
                     merged_confidence,
                     merged_explanation,
                     legacy_collision["relation_id"],
