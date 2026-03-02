@@ -1238,6 +1238,64 @@ def test_relations_service_verify_all_gates_all_eligible(tmp_path: Path, monkeyp
     assert count == 1
 
 
+def test_relations_service_verify_can_drop_relation_without_fk_error(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    _seed_verify_relation_case(db_path, "RG-2024-916")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE citation_links SET target_norm_key = '' WHERE citation_id = (SELECT citation_id FROM citations WHERE source_doc_key = ?)", ("RG-2024-916",))
+        conn.commit()
+
+    def fake_extract(_text):
+        from rg_atp_pipeline.services.relation_extractor import RelationCandidate
+
+        return [
+            RelationCandidate(
+                relation_type="MODIFIES",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="1",
+                confidence=0.95,
+                evidence_snippet="Modifícase algo",
+                explanation="regex candidate",
+            )
+        ]
+
+    def fake_verify(payload, **_kwargs):
+        return [
+            {
+                "candidate_id": payload[0]["candidate_id"],
+                "relation_type": "ACCORDING_TO",
+                "direction": "SOURCE_TO_TARGET",
+                "scope": "WHOLE_NORM",
+                "scope_detail": None,
+                "confidence": 0.99,
+                "explanation": "según norma sin target",
+            }
+        ]
+
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.extract_relation_candidates", fake_extract)
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.verify_relation_candidates", fake_verify)
+
+    summary = run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-916"],
+        limit_docs=None,
+        llm_mode="verify_all",
+        min_confidence=0.9,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    assert summary["skipped_according_to_no_target_now"] == 1
+    with sqlite3.connect(db_path) as conn:
+        relation_count = conn.execute("SELECT COUNT(*) FROM relation_extractions").fetchone()[0]
+        review_count = conn.execute("SELECT COUNT(*) FROM relation_llm_reviews").fetchone()[0]
+    assert relation_count == 0
+    assert review_count == 0
+
+
 def test_relations_service_invalid_id_persists_raw_item(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "state" / "rg_atp.sqlite"
     ensure_schema(db_path)
@@ -1506,6 +1564,9 @@ def test_relations_service_llm_candidate_id_must_be_literal(tmp_path: Path, monk
     db_path = tmp_path / "state" / "rg_atp.sqlite"
     ensure_schema(db_path)
     _seed_verify_relation_case(db_path, "RG-2024-916")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE citation_links SET target_norm_key = '' WHERE citation_id = (SELECT citation_id FROM citations WHERE source_doc_key = ?)", ("RG-2024-916",))
+        conn.commit()
 
     def fake_extract(_text):
         return [
