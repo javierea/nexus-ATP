@@ -1296,6 +1296,63 @@ def test_relations_service_verify_can_drop_relation_without_fk_error(tmp_path: P
     assert review_count == 0
 
 
+def test_relations_service_persists_llm_reviews_if_intra_norm_insert_fails(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state" / "rg_atp.sqlite"
+    ensure_schema(db_path)
+    _seed_verify_relation_case(db_path, "RG-2024-917")
+
+    def fake_extract(_text):
+        return [
+            RelationCandidate(
+                relation_type="MODIFIES",
+                direction="OUTGOING",
+                scope="ARTICLE",
+                scope_detail="1",
+                confidence=0.95,
+                evidence_snippet="Modifícase algo",
+                explanation="regex candidate",
+            )
+        ]
+
+    def fake_verify(payload, **_kwargs):
+        return [
+            {
+                "candidate_id": payload[0]["candidate_id"],
+                "relation_type": "MODIFIES",
+                "direction": "SOURCE_TO_TARGET",
+                "scope": "ARTICLE",
+                "scope_detail": "1",
+                "confidence": 0.99,
+                "explanation": "modifica artículo 1",
+            }
+        ]
+
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.extract_relation_candidates", fake_extract)
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service.verify_relation_candidates", fake_verify)
+
+    def fail_intra(*_args, **_kwargs):
+        raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+    monkeypatch.setattr("rg_atp_pipeline.services.relations_service._materialize_intra_norm_relations", fail_intra)
+
+    summary = run_relations(
+        db_path=db_path,
+        data_dir=tmp_path,
+        doc_keys=["RG-2024-917"],
+        limit_docs=None,
+        llm_mode="verify_all",
+        min_confidence=0.9,
+        prompt_version="reltype-v1",
+        batch_size=5,
+    )
+
+    assert summary["llm_verified"] == 1
+    assert summary["errors"]
+    with sqlite3.connect(db_path) as conn:
+        review_count = conn.execute("SELECT COUNT(*) FROM relation_llm_reviews").fetchone()[0]
+    assert review_count == 1
+
+
 def test_relations_service_invalid_id_persists_raw_item(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "state" / "rg_atp.sqlite"
     ensure_schema(db_path)

@@ -281,6 +281,7 @@ def run_relations(
                 )
             if final_type == "UNKNOWN" or final_conf < 0.5:
                 unknown_count += 1
+        conn.commit()
         gated_count = len(pending_llm)
         logger.info(
             "Stage 4.1 candidates: total_candidates_detected=%s candidates_inserted_now=%s gated_count=%s skipped_already_reviewed_count=%s",
@@ -515,19 +516,34 @@ def run_relations(
                     ):
                         inserted_according_to_with_target_now += 1
 
+                conn.commit()
+
                 if progress_callback:
                     processed = min(start + len(batch), len(pending_llm))
                     progress_callback(processed, len(pending_llm), "Verificando relaciones con LLM...")
 
         for unit in units_seen_for_intra.values():
-            intra_norm_relations_inserted += _materialize_intra_norm_relations(
-                conn,
-                source_doc_key=str(unit["source_doc_key"]),
-                source_unit_id=int(unit["source_unit_id"]),
-                source_unit_number=unit["source_unit_number"],
-                unit_text=str(unit["unit_text"]),
-                extract_version=extract_version,
-            )
+            try:
+                intra_norm_relations_inserted += _materialize_intra_norm_relations(
+                    conn,
+                    source_doc_key=str(unit["source_doc_key"]),
+                    source_unit_id=int(unit["source_unit_id"]),
+                    source_unit_number=unit["source_unit_number"],
+                    unit_text=str(unit["unit_text"]),
+                    extract_version=extract_version,
+                )
+            except sqlite3.IntegrityError as exc:
+                errors.append(str(exc))
+                logger.error(
+                    "Stage 4.1 failed persisting intra-norm relations doc_key=%s unit_id=%s: %s",
+                    unit.get("source_doc_key"),
+                    unit.get("source_unit_id"),
+                    exc,
+                )
+                conn.rollback()
+                continue
+
+        conn.commit()
 
         unknown_count = by_type_inserted.get("UNKNOWN", 0)
         logger.info(
@@ -542,7 +558,7 @@ def run_relations(
             missing_result_now,
             batches_unparsable_now,
         )
-        conn.commit()
+
 
     return {
         "docs_processed": docs_processed,
